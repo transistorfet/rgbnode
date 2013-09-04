@@ -1,0 +1,9 @@
+
+- limited palette for swirl
+- add feedback such that every certain amount of change to delay will make it
+  strobe the lights temporarily to signal the delay length
+- favorite delay buttons (recall, chn ret, sleep?)
+ 
+- get the change hue buttons to work
+- get serial communications to work
+

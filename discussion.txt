@@ -1,0 +1,31 @@
+
+
+- the RGB engine, as well as the comm protocol (which is less important)
+  should support certain functions (which I will discuss below)
+
+- I've had minor questions in my head about the importance and value of having
+  seperate controllers with seperately controlled lights.  You'll probably want
+  the RGB strips to behave the same more often than you will want them different.
+  With singular changes, that will be very easy, but animated changes will be
+  harder (but not impossible).  To that end, sync messages could be sent; a
+  'fade to colour' message sent each time the master completes its last fade
+  (for the swirl animation).  That whole brownian motion animation idea will be
+  harder though and will likely require constant comm traffic.
+
+
+POSSIBLE/NEEDED ENGINE STATE CHANGIE THINGS:
+- set colour, stop
+- strobe colour
+- fade colour
+(damn this makes no sense, I should wait until I get home to do this).
+
+
+POSSIBLE/NEEDED COMM MESSAGES:
+- change colour
+- change mode??
+- change colour after time delay
+- fade to colour over time delay
+
+
+
+
