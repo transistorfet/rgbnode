@@ -4,8 +4,6 @@
 #include <IRremote.h>
 #include "colours.h"
 
-//#define DEBUG
-#undef DEBUG
 
 /*******************
  * Pin Assignments *
@@ -269,16 +267,6 @@ void update_rgb_state(void);
 void rgb_next_state(void);
 RGBcol rgb_next_colour(void);
 
-#ifdef DEBUG
-#define PRINTCOLOUR(c)			\
-	Serial.print((c).r, DEC);	\
-	Serial.print(' ');		\
-	Serial.print((c).g, DEC);	\
-	Serial.print(' ');		\
-	Serial.print((c).b, DEC);	\
-	Serial.print('\n');
-#endif
-
 void rgb_send_set()
 {
 	Daisy.print('S');
@@ -362,17 +350,6 @@ void update_rgb_state(void)
 		rgb_running = 0;
 	else if ((rgb_hold && ((millis() - rgb_hold_last) > rgb_hold)))
 		rgb_clear_state();
-
-	#ifdef DEBUG
-	if (change != 0) {
-		Serial.print(rgb_output.r, DEC);
-		Serial.print(' ');
-		Serial.print(rgb_output.g, DEC);
-		Serial.print(' ');
-		Serial.print(rgb_output.b, DEC);
-		Serial.print('\n');
-	}
-	#endif
 }
 
 void rgb_setup_fade(int delay)
@@ -387,46 +364,17 @@ void rgb_setup_fade(int delay)
 
 void rgb_next_state(void)
 {
-	#ifdef DEBUG
-	Serial.print("Finished state ");
-	Serial.print(rgb_state, DEC);
-	Serial.print("\n");
-	#endif
-
 	switch (rgb_state) {
 	    case RS_SWIRL_HOLD:
 		rgb_state = RS_SWIRL_FADE;
 		rgb_target = rgb_next_colour();
 		rgb_setup_fade(rgb_delay);
 		rgb_send_fade();
-
-		#ifdef DEBUG
-		Serial.print("Next colour: ");
-		Serial.print(rgb_col_index, DEC);
-		Serial.print("\n");
-		Serial.print("Target: ");
-		PRINTCOLOUR(rgb_target)
-		Serial.print("Output: ");
-		PRINTCOLOUR(rgb_output)
-
-		Serial.print("FADE for ");
-		Serial.print(rgb_mpc[0], DEC);
-		Serial.print("ms ");
-		Serial.print(rgb_mpc[1], DEC);
-		Serial.print("ms ");
-		Serial.print(rgb_mpc[2], DEC);
-		Serial.print("ms\n");
-		#endif
 		break;
 	    case RS_SWIRL_FADE:
 		rgb_state = RS_SWIRL_HOLD;
 		rgb_hold = rgb_delay;
 		rgb_hold_last = millis();
-		#ifdef DEBUG
-		Serial.print("HOLD for ");
-		Serial.print(rgb_hold, DEC);
-		Serial.print("ms\n");
-		#endif
 		break;
 	    case RS_STROBE_ON:
 		rgb_state = RS_STROBE_OFF;
