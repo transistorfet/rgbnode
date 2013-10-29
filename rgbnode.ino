@@ -232,6 +232,7 @@ RGBcol rgb_colour = { 0xFF, 0xFF, 0xFF };
 
 int rgb_on = 0;
 int rgb_intensity = RGB_MAX_INTENSITY;
+int rgb_intensity_prev = -1;
 
 /// RGB State Machine
 enum {
@@ -636,17 +637,16 @@ void process_ir(int key)
 	    case 0x2F8:		// Channel Down
 		set_channel(channel - 1);
 		break;
-	//    case 0x208:		// Mute
-	//	if (rgb_intensity_prev == -1) {
-	//		rgb_intensity_prev = rgb_intensity;
-	//		rgb_intensity = RGB_MAX_INTENSITY;
-	//	}
-	//	else {
-	//		rgb_intensity = rgb_intensity_prev;
-	//		rgb_intensity_prev = -1;
-	//	}
-	//	break;
-	//
+	    case 0x208:		// Mute
+		if (rgb_intensity_prev == -1) {
+			rgb_intensity_prev = rgb_intensity;
+			rgb_intensity = RGB_MAX_INTENSITY;
+		}
+		else {
+			rgb_intensity = rgb_intensity_prev;
+			rgb_intensity_prev = -1;
+		}
+		break;
 	    case 0x258:		// Volume Up
 		rgb_intensity += (rgb_intensity >> 3) + 1;
 		if (rgb_intensity > RGB_MAX_INTENSITY)
@@ -675,58 +675,119 @@ void process_ir(int key)
 	}
 }
 
+#define SERIAL_MAX_ARGS		5
+
 void process_serial()
 {
+	char i;
+	char nargs = 0;
+	char argi[SERIAL_MAX_ARGS];
+
 	LongT temp;
 
 	if (!serial_avail)
 		return;
 
-	if (serial_rb[0] == 'I') {		// Transmit IR Code
-		if (serial_rb[1] == 's') {
-			temp.value = strtol(&serial_rb[2], NULL, 16);
+	// Locate the indexes to each word and change spaces and newline to null terminations
+	for (i = 0; i < serial_r && serial_rb[i] != '\0'; i++) {
+		if (serial_rb[i] == ' ') {
+			serial_rb[i] = '\0';
+			argi[nargs] = i + 1;
+			if (++nargs >= SERIAL_MAX_ARGS)
+				break;
+		}
+		else if (serial_rb[i] == '\n') {
+			serial_rb[i] = '\0';
+			break;
+		}
+	}
+
+	// Determine and execute command
+	if (!strcmp(serial_rb, "ir")) {			// Transmit IR Code
+		if (nargs < 2)
+			return;
+		if (serial_rb[argi[0]] == 'S') {
+			temp.value = strtol(&serial_rb[argi[1]], NULL, 16);
 			ir_send_sony(temp.value);
 		}
-		else if (serial_rb[1] == 'p') {
+		else if (serial_rb[argi[0]] == 'P') {
 			int addr;
-			char *endptr = NULL;
 
-			addr = strtol(&serial_rb[2], &endptr, 16);
-			if (*endptr == ',') {
-				temp.value = strtol(&endptr[1], NULL, 16);
-				ir_send_panasonic(addr, temp.value);
-			}
+			if (nargs < 3)
+				return;
+			addr = strtol(&serial_rb[argi[1]], NULL, 16);
+			temp.value = strtol(&serial_rb[argi[2]], NULL, 16);
+			ir_send_panasonic(addr, temp.value);
+		}	
+	}
+	else if (!strcmp(serial_rb, "key")) {		// Receive Key (IR Input for RGBNode, not for transmission)
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			process_ir((int) temp.value);
 		}
 	}
-	else if (serial_rb[0] == 'S') {		// Set RGB Colour
-		if (serial_r != 8)	// 1 char + 6 data command plus linefeed
-			return;
-		temp.value = strtol(&serial_rb[1], NULL, 16);
-		rgb_state = RS_STOP;
-		rgb_running = 0;
-		rgb_output.c[0] = temp.bytes[2];
-		rgb_output.c[1] = temp.bytes[1];
-		rgb_output.c[2] = temp.bytes[0];
-	}
-	else if (serial_rb[0] == 'C') {		// Set RGB Channel/Mode
-		if (serial_rb[1] >= '0' && serial_rb[1] <= '9')
-			set_channel(serial_rb[1] - '0');
-	}
-	else if (serial_rb[0] == 'L') {		// RGB Power On/Off
-		if (serial_rb[1] == '0')
-			rgb_on = 0;
-		else if (serial_rb[1] == '1')
-			rgb_on = 1;
-		else if (serial_rb[1] == 'x')
+	else if (!strcmp(serial_rb, "power")) {		// RGB Power On/Off
+		if (nargs) {
+			if (serial_rb[argi[0]] == '0')
+				rgb_on = 0;
+			else if (serial_rb[argi[0]] == '1')
+				rgb_on = 1;
+		}
+		else {
 			rgb_on = rgb_on ? 0 : 1;
+		}
 	}
-	else if (serial_rb[0] == 'D') {		// Set RGB Delay
-		temp.value = strtol(&serial_rb[1], NULL, 16);
-		rgb_delay = temp.value;
+	else if (!strcmp(serial_rb, "color")) {		// Set RGB Colour
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			rgb_state = RS_STOP;
+			rgb_running = 0;
+			rgb_output.c[0] = temp.bytes[2];
+			rgb_output.c[1] = temp.bytes[1];
+			rgb_output.c[2] = temp.bytes[0];
+		}
+		else {
+			// TODO return colour
+			//Serial.print("color", ...);
+		}
 	}
-	else if (serial_rb[0] == 'P') {		// Set RGB Palette Colour
-		temp.value = strtol(&serial_rb[1], NULL, 16);
-		rgb_set_index_colour(temp.value);
+	else if (!strcmp(serial_rb, "delay")) {		// Set RGB Delay
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			rgb_delay = temp.value;
+		}
+	}
+	else if (!strcmp(serial_rb, "channel")) {	// Set RGB Channel/Mode
+		if (nargs) {
+			char *arg = &serial_rb[argi[0]];
+			if (arg[1] == '\0' && arg[0] >= '0' && arg[0] <= '9')
+				set_channel(arg[0] - '0');
+		}
+	}
+	else if (!strcmp(serial_rb, "index")) {		// Set RGB Palette Colour
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			rgb_set_index_colour(temp.value);
+		}
+	}
+	else if (!strcmp(serial_rb, "intensity")) {	// Set RGB Intensity
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			if (temp.value <= RGB_MAX_INTENSITY)
+				rgb_intensity = temp.value;
+		}
+	}
+	else if (!strcmp(serial_rb, "chanup")) {	// Increment RGB Channel
+		set_channel(channel + 1);
+	}
+	else if (!strcmp(serial_rb, "chandown")) {	// Decrement RGB Channel
+		set_channel(channel - 1);
+	}
+	else if (!strcmp(serial_rb, "indexup")) {	// Increment RGB Index Colour
+		rgb_set_index_colour(rgb_col_index + 1);
+	}
+	else if (!strcmp(serial_rb, "indexdown")) {	// Decrement RGB Index Colour
+		rgb_set_index_colour(rgb_col_index - 1);
 	}
 }
 
@@ -740,6 +801,8 @@ void process_daisy()
 	if (!daisy_avail)
 		return;
 
+
+/*
 	Daisy.print(daisy_rb);
 
 	switch (daisy_rb[0]) {
@@ -786,6 +849,7 @@ void process_daisy()
 	    default:
 		break;
 	}
+*/
 }
 
 
@@ -806,6 +870,9 @@ void setup()
 	analogWrite(PIN_RED, 0);
 	analogWrite(PIN_GREEN, 0);
 	analogWrite(PIN_BLUE, 0);
+
+	// Put Timer1 into FastPWM mode to match Timer0.  This should eliminate the flickering effect
+	bitSet(TCCR1B, WGM12);
 
 	Serial.begin(SERIAL_SPEED);
 	clear_serial();
