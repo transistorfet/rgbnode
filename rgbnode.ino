@@ -23,39 +23,24 @@
 #define PIN_DAISYRX	7
 #define PIN_DAISYTX	8
 
+#define PIN_WRELAY_ON	10
+#define PIN_WRELAY_OFF	11
 
 /************
  * IR Codes *
  ************/
 
+// These codes are used by the NEC Remote for turning the TV and Stereo on and off
 #define TV_ADDR		0x4004
 #define TV_POWER	0x100BCBD
 #define STEREO_POWER	0xA81
-
-/*
-#define TV_ADDR		0x4004
-#define TV_POWER	0x100BCBD
-#define TV_VOLUP	0x1000405
-#define TV_VOLDOWN	0x1008485
-#define TV_INPUT	0x100A0A1
-#define TV_TWO		0x1008889
-#define TV_THREE	0x1004849
-
-unsigned long tv[] = { TV_POWER, TV_VOLUP, TV_VOLDOWN, TV_INPUT, TV_TWO, TV_THREE };
-
-#define STEREO_POWER	0xA81
-#define STEREO_VOLUP	0x481
-#define STEREO_VOLDOWN	0xC81
-#define STEREO_TAPE	0xC41
-#define STEREO_TUNER	0x841
-
-unsigned int stereo[] = { STEREO_POWER, STEREO_VOLUP, STEREO_VOLDOWN, STEREO_TAPE, STEREO_TUNER };
-*/
 
 typedef union {
 	unsigned char bytes[4];
 	unsigned long value;
 } LongT;
+
+int wrelay = 0;
 
 /******************************
  * Serial Communications Code *
@@ -63,7 +48,6 @@ typedef union {
 
 #define SERIAL_SIZE	32
 #define SERIAL_SPEED	19200
-#define DAISY_SPEED	19200
 
 char serial_r = 0;
 char serial_avail = 0;
@@ -99,58 +83,77 @@ void clear_serial()
  * DaisyWire Communications Code *
  *********************************/
 
-#define DAISY_SIZE	32
+#define DAISY_ON	0xA0
+#define DAISY_SET	0xA1
+#define DAISY_FADE	0xA2
+#define DAISY_INTENSITY	0xA3
+#define DAISY_CALIBRATE	0xA4
+#define DAISY_KEY	0xA5
+
+#define DAISY_SIZE	16
 #define DAISY_SPEED	19200
 
 char daisy_r = 0;
+char daisy_size = 0;
 char daisy_avail = 0;
-char daisy_rb[SERIAL_SIZE];
+byte daisy_rb[SERIAL_SIZE];
 
 SoftwareSerial Daisy(PIN_DAISYRX, PIN_DAISYTX);
 
 int read_daisy()
 {
 	int b;
+	byte checksum;
 
 	b = Daisy.read();
 	if (b == -1)
 		return 0;
 
-	daisy_rb[daisy_r] = b;
-	if (b == '\n' || b == '\r') {
-		daisy_rb[daisy_r + 1] = '\0';
-		daisy_avail = 1;
+	if (!daisy_size) {
+		daisy_size = b;
 	}
-	if (daisy_r < SERIAL_SIZE)
-		daisy_r++;
+	else {
+		daisy_rb[daisy_r++] = b;
+		if (daisy_r == daisy_size) {
+			Serial.print("debug ");
+			Serial.print(daisy_r, DEC);
+			Serial.write(' ');
+			for (char i = 0; i < daisy_r; i++) {
+				Serial.print((byte) daisy_rb[i], HEX);
+				Serial.write(' ');
+			}
+			Serial.write('\n');
 
-	//b = debug.read();
-	//if (b != -1)
-	//	Daisy.write(b);
+			checksum = daisy_checksum();
+			//if (daisy_rb[daisy_r - 1] == checksum)
+				daisy_avail = 1;
+			//else {
+			//	Serial.print("X\n");
+			//	clear_daisy();
+			//}
+		}
+		if (daisy_r == SERIAL_SIZE)
+			clear_daisy();
+	}
 	return daisy_avail;
 }
 
 void clear_daisy()
 {
 	daisy_avail = 0;
+	daisy_size = 0;
 	daisy_r = 0;
 }
 
-int daisy_get_num(int &i)
+byte daisy_checksum()
 {
-	int start = i;
+	byte ret = 0;
 
-	for (; i <= daisy_r; i++) {
-		if (daisy_rb[i] == ',' || daisy_rb[i] == '\n') {
-			daisy_rb[i++] = '\0';
-			break;
-		}
-		else if (daisy_rb[i] < 0x30 || daisy_rb[i] > 0x39)
-			return(0);
+	for (char i = 0; i < daisy_size - 1; i++) {
+		ret += daisy_rb[i];
 	}
-	return(atoi(&daisy_rb[start]));
+	return(ret);
 }
-
 
 /********************
  * IR Recevier Code *
@@ -217,6 +220,7 @@ void ir_send_panasonic(unsigned int address, unsigned long data)
  *******************/
 
 #define RGB_MAX_INTENSITY	0xff
+#define RGB_DEFAULT_INTENSITY	0x80
 #define RGB_BROWNIAN_MAX	0x600
 
 enum {
@@ -231,7 +235,7 @@ char rgb_col_index = 0;
 RGBcol rgb_colour = { 0xFF, 0xFF, 0xFF };
 
 int rgb_on = 0;
-int rgb_intensity = RGB_MAX_INTENSITY;
+int rgb_intensity = RGB_DEFAULT_INTENSITY;
 int rgb_intensity_prev = -1;
 
 /// RGB State Machine
@@ -250,8 +254,9 @@ enum {
 
 char rgb_running = 0;
 byte rgb_state = RS_STOP;
-RGBcol rgb_target = { 0xFF, 0xFF, 0xFF };
-RGBcol rgb_output = { 0xFF, 0xFF, 0xFF };
+RGBcol rgb_target = { 0xFF, 0xC0, 0x20 };
+RGBcol rgb_output = { 0xFF, 0xC0, 0x20 };
+RGBcol rgb_calibrate = { 0xFF, 0xFF, 0xFF };
 
 /// If the Millisecond per Change value is postive, channel is incremented every * milliseconds.
 /// If negative, channel is decremented every * milliseconds
@@ -268,35 +273,57 @@ void update_rgb_state(void);
 void rgb_next_state(void);
 RGBcol rgb_next_colour(void);
 
+void rgb_enable(char mode)
+{
+	if (mode >= 0)
+		rgb_on = mode;
+	else {
+		if (++rgb_on >= 4)
+			rgb_on = 0;
+	}
+
+	// Send on/off command to slave devices
+	mode = (rgb_on & 0x02) >> 1;
+	Daisy.write((byte) 0x03);
+	Daisy.write((byte) DAISY_ON);
+	Daisy.write((byte) mode);
+	Daisy.write((byte) DAISY_ON + mode);
+}
+
 void rgb_send_set()
 {
-	Daisy.print('S');
-	Daisy.print(rgb_output.c[0], DEC);
-	Daisy.print(',');
-	Daisy.print(rgb_output.c[1], DEC);
-	Daisy.print(',');
-	Daisy.print(rgb_output.c[2], DEC);
-	Daisy.print('\n');
+	Daisy.write((byte) 0x05);
+	Daisy.write((byte) DAISY_SET);
+	Daisy.write((byte) rgb_output.c[0]);
+	Daisy.write((byte) rgb_output.c[1]);
+	Daisy.write((byte) rgb_output.c[2]);
+	Daisy.write((byte) DAISY_SET + rgb_output.c[0] + rgb_output.c[1] + rgb_output.c[2]);
 }
 
 void rgb_send_fade()
 {
-	Daisy.print('F');
-	Daisy.print(rgb_target.c[0], DEC);
-	Daisy.print(',');
-	Daisy.print(rgb_target.c[1], DEC);
-	Daisy.print(',');
-	Daisy.print(rgb_target.c[2], DEC);
-	Daisy.print(',');
-	Daisy.print(rgb_delay, DEC);
-	Daisy.print('\n');
+	Daisy.write((byte) 0x06);
+	Daisy.write((byte) DAISY_FADE);
+	Daisy.write((byte) rgb_delay);
+	Daisy.write((byte) rgb_output.c[0]);
+	Daisy.write((byte) rgb_output.c[1]);
+	Daisy.write((byte) rgb_output.c[2]);
+	Daisy.write((byte) DAISY_FADE + rgb_delay + rgb_output.c[0] + rgb_output.c[1] + rgb_output.c[2]);
+}
+
+void rgb_send_intensity()
+{
+	Daisy.write((byte) 0x03);
+	Daisy.write((byte) DAISY_INTENSITY);
+	Daisy.write((byte) rgb_intensity);
+	Daisy.write((byte) DAISY_INTENSITY + rgb_intensity);
 }
 
 void update_rgb()
 {
 	unsigned int r, g, b, i, m;
 
-	if (rgb_on) {
+	if (rgb_on & 0x01) {
 		if (rgb_running)
 			update_rgb_state();
 		if (!rgb_running && rgb_state != RS_STOP)
@@ -309,9 +336,9 @@ void update_rgb()
 		g = ( ((int) output[GREEN]) * i ) / m;
 		b = ( ((int) output[BLUE]) * i ) / m;
 */
-		r = map(rgb_output.r, 0, 255, 0, rgb_intensity);
-		g = map(rgb_output.g, 0, 255, 0, rgb_intensity);
-		b = map(rgb_output.b, 0, 255, 0, rgb_intensity);
+		r = map(rgb_output.r, 0, 255, 0, map(rgb_intensity, 0, 255, 0, rgb_calibrate.r));
+		g = map(rgb_output.g, 0, 255, 0, map(rgb_intensity, 0, 255, 0, rgb_calibrate.g));
+		b = map(rgb_output.b, 0, 255, 0, map(rgb_intensity, 0, 255, 0, rgb_calibrate.b));
 
 		analogWrite(PIN_RED, r);
 		analogWrite(PIN_GREEN, g);
@@ -452,6 +479,7 @@ void rgb_next_state(void)
 		rgb_state = RS_STOP;
 		rgb_output = rgb_target;
 		rgb_send_set();
+		rgb_running = 0;
 		return;
 	    default:
 		break;
@@ -498,12 +526,35 @@ void rgb_set_index_colour(char col)
 	rgb_running = 1;
 }
 
+void rgb_set_absolute_colour(byte r, byte g, byte b)
+{
+	rgb_state = RS_STOP;
+	rgb_running = 0;
+	rgb_mpc[0] = 0;
+	rgb_mpc[1] = 0;
+	rgb_mpc[2] = 0;
+	rgb_output.r = r;
+	rgb_output.g = g;
+	rgb_output.b = b;
+	rgb_send_set();
+}
+
+void rgb_set_intensity(int i)
+{
+	if (i < 0)
+		i = 0;
+	else if (i > RGB_MAX_INTENSITY)
+		i = RGB_MAX_INTENSITY;
+	rgb_intensity = (byte) i;
+	rgb_send_intensity();
+}
+
 /**************************
  * Channel Behaviour Code *
  **************************/
 
 #define MAX_CHANNEL	10
-int channel = 1;
+int channel = 3;
 int relay_on = 0;
 
 void set_channel(char ch)
@@ -574,10 +625,12 @@ void process_ir(int key)
 {
 	int prev_channel = channel;
 
-	if (!rgb_on && key != 0x248) {
-		Daisy.print('I');
-		Daisy.print(key, HEX);
-		Daisy.print('\n');
+	if (!(rgb_on & 0x01) && key != 0x248) {
+		Daisy.write((byte) 0x04);
+		Daisy.write((byte) DAISY_KEY);
+		Daisy.write((byte) (key & 0xFF));
+		Daisy.write((byte) ((key >> 8) & 0xFF));
+		Daisy.write((byte) DAISY_KEY + (key & 0xFF) + ((key >> 8) & 0xFF));
 	}
 
 	switch (key) {
@@ -594,12 +647,13 @@ void process_ir(int key)
 	    case 0x248:		// Power
 		if (ir_repeat)	// Don't allow repeat codes
 			break;
-		if (++dev_on >= 4)
-			dev_on = 0;
-		rgb_on = (dev_on & 0x01);
+		//if (++dev_on >= 4)
+		//	dev_on = 0;
+		//rgb_on = (dev_on & 0x01);
 		/// Send on/off command to slave devices
-		Daisy.print((dev_on & 0x02) >> 1, DEC);
-		Daisy.print('\n');
+		//Daisy.print((dev_on & 0x02) >> 1, DEC);
+		//Daisy.print('\n');
+		rgb_enable(-1);
 		break;
 	    case 0x280:		// One
 		set_channel(1);
@@ -640,22 +694,18 @@ void process_ir(int key)
 	    case 0x208:		// Mute
 		if (rgb_intensity_prev == -1) {
 			rgb_intensity_prev = rgb_intensity;
-			rgb_intensity = RGB_MAX_INTENSITY;
+			rgb_set_intensity(RGB_MAX_INTENSITY);
 		}
 		else {
-			rgb_intensity = rgb_intensity_prev;
+			rgb_set_intensity(rgb_intensity_prev);
 			rgb_intensity_prev = -1;
 		}
 		break;
 	    case 0x258:		// Volume Up
-		rgb_intensity += (rgb_intensity >> 3) + 1;
-		if (rgb_intensity > RGB_MAX_INTENSITY)
-			rgb_intensity = RGB_MAX_INTENSITY;
+		rgb_set_intensity(rgb_intensity + (rgb_intensity >> 3) + 1);
 		break;
 	    case 0x278:		// Volume Down
-		rgb_intensity -= (rgb_intensity >> 3) - 1;
-		if (rgb_intensity < 0)
-			rgb_intensity = 0;
+		rgb_set_intensity(rgb_intensity - (rgb_intensity >> 3) - 1);
 		break;
 	    case 0x241:		// Channel Set +
 		rgb_set_index_colour(rgb_col_index - 1);
@@ -728,33 +778,66 @@ void process_serial()
 	}
 	else if (!strcmp(serial_rb, "power")) {		// RGB Power On/Off
 		if (nargs) {
-			if (serial_rb[argi[0]] == '0')
-				rgb_on = 0;
-			else if (serial_rb[argi[0]] == '1')
-				rgb_on = 1;
+			char mode = strtol(&serial_rb[argi[0]], NULL, 16);
+			if (mode >= 0 && mode <= 3)
+				rgb_enable(mode);
 		}
 		else {
-			rgb_on = rgb_on ? 0 : 1;
+			rgb_enable(-1);
 		}
 	}
 	else if (!strcmp(serial_rb, "color")) {		// Set RGB Colour
 		if (nargs) {
 			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_state = RS_STOP;
-			rgb_running = 0;
-			rgb_output.c[0] = temp.bytes[2];
-			rgb_output.c[1] = temp.bytes[1];
-			rgb_output.c[2] = temp.bytes[0];
+			rgb_set_absolute_colour(temp.bytes[2], temp.bytes[1], temp.bytes[0]);
 		}
 		else {
 			// TODO return colour
 			//Serial.print("color", ...);
 		}
 	}
+	else if (!strcmp(serial_rb, "red")) {		// Set Red Value
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			rgb_output.r = temp.value;
+		}
+		else {
+			Serial.print("red ");
+			Serial.print(rgb_output.r, HEX);
+			Serial.write('\n');
+		}
+	}
+	else if (!strcmp(serial_rb, "green")) {		// Set Green Value
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			rgb_output.g = temp.value;
+		}
+		else {
+			Serial.print("green ");
+			Serial.print(rgb_output.g, HEX);
+			Serial.write('\n');
+		}
+	}
+	else if (!strcmp(serial_rb, "blue")) {		// Set Blue Value
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			rgb_output.b = temp.value;
+		}
+		else {
+			Serial.print("blue ");
+			Serial.print(rgb_output.b, HEX);
+			Serial.write('\n');
+		}
+	}
 	else if (!strcmp(serial_rb, "delay")) {		// Set RGB Delay
 		if (nargs) {
 			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
 			rgb_delay = temp.value;
+		}
+		else {
+			Serial.print("delay ");
+			Serial.print(rgb_delay, HEX);
+			Serial.write('\n');
 		}
 	}
 	else if (!strcmp(serial_rb, "channel")) {	// Set RGB Channel/Mode
@@ -773,8 +856,12 @@ void process_serial()
 	else if (!strcmp(serial_rb, "intensity")) {	// Set RGB Intensity
 		if (nargs) {
 			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			if (temp.value <= RGB_MAX_INTENSITY)
-				rgb_intensity = temp.value;
+			rgb_set_intensity(temp.value);
+		}
+		else {
+			Serial.print("intensity ");
+			Serial.print(rgb_intensity, HEX);
+			Serial.write('\n');
 		}
 	}
 	else if (!strcmp(serial_rb, "chanup")) {	// Increment RGB Channel
@@ -789,6 +876,33 @@ void process_serial()
 	else if (!strcmp(serial_rb, "indexdown")) {	// Decrement RGB Index Colour
 		rgb_set_index_colour(rgb_col_index - 1);
 	}
+	else if (!strcmp(serial_rb, "calibrate")) {	// Send calibration RGB values to slave
+		if (nargs) {
+			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
+			Daisy.write((byte) 0x05);
+			Daisy.write((byte) DAISY_CALIBRATE);
+			Daisy.write((byte) temp.bytes[2]);
+			Daisy.write((byte) temp.bytes[1]);
+			Daisy.write((byte) temp.bytes[0]);
+			Daisy.write((byte) DAISY_CALIBRATE + temp.bytes[2] + temp.bytes[1] + temp.bytes[0]);
+		}
+	}
+	else if (!strcmp(serial_rb, "relay_toggle")) {		// Control wireless relay
+		if (nargs) {
+			if (wrelay) {
+				wrelay = 0;
+				digitalWrite(PIN_WRELAY_OFF, 1);
+				delay(1000);
+				digitalWrite(PIN_WRELAY_OFF, 0);
+			}
+			else {
+				wrelay = 1;
+				digitalWrite(PIN_WRELAY_ON, 1);
+				delay(1000);
+				digitalWrite(PIN_WRELAY_ON, 0);
+			}
+		}
+	}
 }
 
 void process_daisy()
@@ -801,55 +915,45 @@ void process_daisy()
 	if (!daisy_avail)
 		return;
 
-
-/*
-	Daisy.print(daisy_rb);
-
 	switch (daisy_rb[0]) {
-	    case '1':
-		rgb_on = 1;
+	    case DAISY_ON:
+		rgb_enable(daisy_rb[1]);
 		break;
-	    case '0':
-		rgb_on = 0;
-		break;
-	    case 'c':
-		if (daisy_rb[1] >= '0' && daisy_rb[1] <= '9')
-			set_channel(daisy_rb[1] - '0');
-		break;
-	    case '-':
-		//rgb_on = 0;
-		break;
-	    case 'I':
-		i = 1;
-		value = daisy_get_num(i);
-		if (value == -1)
-			ir_repeat = 1;
-		else {
-			ir_repeat = 0;
-			ir_code = value;
-		}
-		process_ir(ir_code);
-		break;
-	    case 'S':
-		i = 1;
+	    case DAISY_SET:
 		rgb_state = RS_STOP;
 		rgb_running = 0;
-		for (int j = 0; j < 3; j++)
-			rgb_output.c[j] = (byte) daisy_get_num(i);
+		rgb_output.c[0] = daisy_rb[1];
+		rgb_output.c[1] = daisy_rb[2];
+		rgb_output.c[2] = daisy_rb[3];
 		break;
-	    case 'F':
-		i = 1;
-		rgb_state = RS_STOP;
+	    case DAISY_FADE:
+		rgb_state = RS_SWIRL_FADE;
 		rgb_running = 1;
-		for (int j = 0; j < 3; j++)
-			rgb_target.c[j] = (byte) daisy_get_num(i);
-		rgb_delay = daisy_get_num(i);
+		rgb_delay = daisy_rb[1];
+		rgb_target.c[0] = daisy_rb[2];
+		rgb_target.c[1] = daisy_rb[3];
+		rgb_target.c[2] = daisy_rb[4];
 		rgb_setup_fade(rgb_delay);
+		break;
+	    case DAISY_INTENSITY:
+		rgb_intensity = daisy_rb[1];
+		break;
+	    case DAISY_CALIBRATE:
+		rgb_calibrate.c[0] = daisy_rb[1];
+		rgb_calibrate.c[1] = daisy_rb[2];
+		rgb_calibrate.c[2] = daisy_rb[3];
+		break;
+	    case DAISY_KEY:
+		int key;
+
+		key = (byte) daisy_rb[2];
+		key <<= 8;
+		key |= (byte) daisy_rb[1];
+		process_ir(key);
 		break;
 	    default:
 		break;
 	}
-*/
 }
 
 
@@ -862,6 +966,8 @@ void setup()
 	randomSeed(analogRead(0));
 
 	pinMode(PIN_RELAY, OUTPUT);
+	pinMode(PIN_WRELAY_ON, OUTPUT);
+	pinMode(PIN_WRELAY_OFF, OUTPUT);
 	pinMode(PIN_LED, OUTPUT);
 
 	pinMode(PIN_RED, OUTPUT);
