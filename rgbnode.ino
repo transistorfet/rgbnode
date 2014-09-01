@@ -83,20 +83,26 @@ void clear_serial()
  * DaisyWire Communications Code *
  *********************************/
 
-#define DAISY_ON	0xA0
-#define DAISY_SET	0xA1
-#define DAISY_FADE	0xA2
-#define DAISY_INTENSITY	0xA3
-#define DAISY_CALIBRATE	0xA4
-#define DAISY_KEY	0xA5
+#define DAISY_ON		0xA0
+#define DAISY_SET_MODE		0xA1
+#define DAISY_SET_DELAY		0xA2
+#define DAISY_SET_TARGET	0xA3
+#define DAISY_SET_INTENSITY	0xA4
+#define DAISY_CALIBRATE		0xA5
+#define DAISY_KEY		0xA6
 
-#define DAISY_SIZE	16
+#define DAISY_FADE		0xA9
+
+#define DAISY_SIZE	8
 #define DAISY_SPEED	19200
 
 char daisy_r = 0;
 char daisy_size = 0;
 char daisy_avail = 0;
-byte daisy_rb[SERIAL_SIZE];
+byte daisy_rb[DAISY_SIZE];
+
+char daisy_w = 0;
+byte daisy_wb[DAISY_SIZE];
 
 SoftwareSerial Daisy(PIN_DAISYRX, PIN_DAISYTX);
 
@@ -115,7 +121,7 @@ int read_daisy()
 	else {
 		daisy_rb[daisy_r++] = b;
 		if (daisy_r == daisy_size) {
-			Serial.print("debug ");
+			Serial.print("debugread ");
 			Serial.print(daisy_r, DEC);
 			Serial.write(' ');
 			for (char i = 0; i < daisy_r; i++) {
@@ -124,13 +130,13 @@ int read_daisy()
 			}
 			Serial.write('\n');
 
-			checksum = daisy_checksum();
-			//if (daisy_rb[daisy_r - 1] == checksum)
+			checksum = daisy_checksum(daisy_rb, daisy_r - 1);
+			if (daisy_rb[daisy_r - 1] == checksum)
 				daisy_avail = 1;
-			//else {
-			//	Serial.print("X\n");
-			//	clear_daisy();
-			//}
+			else {
+				Serial.print("debug checksumfail\n");
+				clear_daisy();
+			}
 		}
 		if (daisy_r == SERIAL_SIZE)
 			clear_daisy();
@@ -145,12 +151,39 @@ void clear_daisy()
 	daisy_r = 0;
 }
 
-byte daisy_checksum()
+void daisy_write_byte(byte ch)
+{
+	daisy_wb[daisy_w++] = ch;
+}
+
+void daisy_send_msg()
+{
+	daisy_wb[daisy_w] = daisy_checksum(daisy_wb, daisy_w);
+	daisy_w++;
+
+	Serial.print("debugwrite ");
+	Serial.print(daisy_w, DEC);
+	Serial.write(' ');
+	for (char i = 0; i < daisy_w; i++) {
+		Serial.print((byte) daisy_wb[i], HEX);
+		Serial.write(' ');
+	}
+	Serial.write('\n');
+
+	Daisy.write((byte) daisy_w);
+	for (char i = 0; i < daisy_w; i++)
+		Daisy.write(daisy_wb[i]);
+
+	// Reset message buffer
+	daisy_w = 0;
+}
+
+byte daisy_checksum(byte *buffer, int len)
 {
 	byte ret = 0;
 
-	for (char i = 0; i < daisy_size - 1; i++) {
-		ret += daisy_rb[i];
+	for (char i = 0; i < len; i++) {
+		ret ^= ~buffer[i];
 	}
 	return(ret);
 }
@@ -215,21 +248,32 @@ void ir_send_panasonic(unsigned int address, unsigned long data)
 }
 
 
-/*******************
- * RGB LED Control *
- *******************/
+/******************
+ * RGB LED Engine *
+ ******************/
 
 #define RGB_MAX_INTENSITY	0xff
 #define RGB_DEFAULT_INTENSITY	0x80
 #define RGB_BROWNIAN_MAX	0x600
 
+/// RGB Modes
+enum {
+	RM_SWITCH,
+	RM_SWIRL,
+	RM_STROBE,
+	RM_FADE_FOLLOW,
+	RM_BROWNIAN
+};
+
+/// RGB Colour Change Modes
 enum {
 	RCM_ONE,
 	RCM_MULTI,
 	RCM_RANDOM
 };
 
-byte rgb_col_mode = RCM_ONE;
+char rgb_mode = RM_SWITCH;
+char rgb_col_mode = RCM_ONE;
 int rgb_delay = 2000;
 char rgb_col_index = 0;
 RGBcol rgb_colour = { 0xFF, 0xFF, 0xFF };
@@ -248,6 +292,16 @@ enum {
 	RS_BROWNIAN,
 	RS_SOLID
 };
+
+/*
+enum {
+	RS_STOP,
+	RS_FADE_ANIMATE,
+	RS_HOLD,
+	RS_STROBE_ON,
+	RS_STROBE_OFF,
+};
+*/
 
 #define RS_SWIRL	RS_SWIRL_HOLD
 #define RS_STROBE	RS_STROBE_OFF
@@ -273,69 +327,31 @@ void update_rgb_state(void);
 void rgb_next_state(void);
 RGBcol rgb_next_colour(void);
 
-void rgb_enable(char mode)
-{
-	if (mode >= 0)
-		rgb_on = mode;
-	else {
-		if (++rgb_on >= 4)
-			rgb_on = 0;
-	}
+void rgb_send_on();
+void rgb_send_mode();
+void rgb_send_target();
+void rgb_send_delay();
+void rgb_send_intensity();
 
-	// Send on/off command to slave devices
-	mode = (rgb_on & 0x02) >> 1;
-	Daisy.write((byte) 0x03);
-	Daisy.write((byte) DAISY_ON);
-	Daisy.write((byte) mode);
-	Daisy.write((byte) DAISY_ON + mode);
-}
-
-void rgb_send_set()
+void rgb_clear_state()
 {
-	Daisy.write((byte) 0x05);
-	Daisy.write((byte) DAISY_SET);
-	Daisy.write((byte) rgb_output.c[0]);
-	Daisy.write((byte) rgb_output.c[1]);
-	Daisy.write((byte) rgb_output.c[2]);
-	Daisy.write((byte) DAISY_SET + rgb_output.c[0] + rgb_output.c[1] + rgb_output.c[2]);
-}
-
-void rgb_send_fade()
-{
-	Daisy.write((byte) 0x06);
-	Daisy.write((byte) DAISY_FADE);
-	Daisy.write((byte) rgb_delay);
-	Daisy.write((byte) rgb_output.c[0]);
-	Daisy.write((byte) rgb_output.c[1]);
-	Daisy.write((byte) rgb_output.c[2]);
-	Daisy.write((byte) DAISY_FADE + rgb_delay + rgb_output.c[0] + rgb_output.c[1] + rgb_output.c[2]);
-}
-
-void rgb_send_intensity()
-{
-	Daisy.write((byte) 0x03);
-	Daisy.write((byte) DAISY_INTENSITY);
-	Daisy.write((byte) rgb_intensity);
-	Daisy.write((byte) DAISY_INTENSITY + rgb_intensity);
+	rgb_running = 0;
+	rgb_hold = 0;
+	rgb_mpc[0] = 0;
+	rgb_mpc[1] = 0;
+	rgb_mpc[2] = 0;
 }
 
 void update_rgb()
 {
-	unsigned int r, g, b, i, m;
+	unsigned int r, g, b;
 
 	if (rgb_on & 0x01) {
 		if (rgb_running)
 			update_rgb_state();
 		if (!rgb_running && rgb_state != RS_STOP)
 			rgb_next_state();
-/*
-		i = rgb_intensity * rgb_intensity;
-		m = RGB_MAX_INTENSITY * RGB_MAX_INTENSITY;
 
-		r = ( ((int) output[RED]) * i ) / m;
-		g = ( ((int) output[GREEN]) * i ) / m;
-		b = ( ((int) output[BLUE]) * i ) / m;
-*/
 		r = map(rgb_output.r, 0, 255, 0, map(rgb_intensity, 0, 255, 0, rgb_calibrate.r));
 		g = map(rgb_output.g, 0, 255, 0, map(rgb_intensity, 0, 255, 0, rgb_calibrate.g));
 		b = map(rgb_output.b, 0, 255, 0, map(rgb_intensity, 0, 255, 0, rgb_calibrate.b));
@@ -354,12 +370,15 @@ void update_rgb()
 void update_rgb_state(void)
 {
 	char change;
-	int diff, last = 0;
+	int diff, last;
 
-	diff = millis() - rgb_mpc_last;
+	last = millis();
+	diff = last - rgb_mpc_last;
 	if (diff < 1)		// Don't update unless there was a change
 		return;
-	rgb_mpc_last = millis();
+	rgb_mpc_last = last;
+
+	last = 0;
 	for (int i = 0; i < 3; i++) {
 		if (rgb_mpc[i] != 0) {
 			last = diff + rgb_mpc_remain[i];
@@ -395,28 +414,37 @@ void rgb_next_state(void)
 	switch (rgb_state) {
 	    case RS_SWIRL_HOLD:
 		rgb_state = RS_SWIRL_FADE;
-		rgb_target = rgb_next_colour();
+		if (rgb_mode != RM_FADE_FOLLOW)
+			rgb_target = rgb_next_colour();
 		rgb_setup_fade(rgb_delay);
-		rgb_send_fade();
+		//rgb_send_fade();
+		rgb_send_target();
 		break;
 	    case RS_SWIRL_FADE:
-		rgb_state = RS_SWIRL_HOLD;
-		rgb_hold = rgb_delay;
-		rgb_hold_last = millis();
+		if (rgb_mode == RM_FADE_FOLLOW) {
+			rgb_state = RS_STOP;
+			rgb_running = 0;
+			return;
+		}
+		else {
+			rgb_state = RS_SWIRL_HOLD;
+			rgb_hold = rgb_delay;
+			rgb_hold_last = millis();
+		}
 		break;
 	    case RS_STROBE_ON:
 		rgb_state = RS_STROBE_OFF;
 		rgb_output = rgb_palette[BLACK];
 		rgb_hold = rgb_delay;
 		rgb_hold_last = millis();
-		rgb_send_set();
+		rgb_send_target();
 		break;
 	    case RS_STROBE_OFF:
 		rgb_state = RS_STROBE_ON;
 		rgb_output = rgb_next_colour();
 		rgb_hold = 20;
 		rgb_hold_last = millis();
-		rgb_send_set();
+		rgb_send_target();
 		break;
 	    case RS_BROWNIAN:
 		//int r, v;
@@ -473,12 +501,12 @@ void rgb_next_state(void)
 
 		rgb_hold = rgb_delay / 20;
 		rgb_hold_last = millis();
-		rgb_send_set();
+		rgb_send_target();
 		break;
 	    case RS_SOLID:
 		rgb_state = RS_STOP;
 		rgb_output = rgb_target;
-		rgb_send_set();
+		rgb_send_target();
 		rgb_running = 0;
 		return;
 	    default:
@@ -502,16 +530,34 @@ RGBcol rgb_next_colour()
 	}
 }
 
-void rgb_clear_state()
+/*
+void rgb_animate()
 {
-	rgb_running = 0;
-	rgb_hold = 0;
-	rgb_mpc[0] = 0;
-	rgb_mpc[1] = 0;
-	rgb_mpc[2] = 0;
+	rgb_setup_fade();
+	rgb_running = 1;
+}
+*/
+
+/************************
+ * RGB Public Functions *
+ ************************/
+
+void rgb_enable(char mode)
+{
+	if (mode >= 0)
+		rgb_on = mode;
+	else {
+		if (++rgb_on >= 4)
+			rgb_on = 0;
+	}
+
+	rgb_send_on();
+	//rgb_send_target();
+	//rgb_send_delay();
+	//rgb_send_mode();
 }
 
-void rgb_set_index_colour(char col)
+void rgb_set_target_by_index(char col)
 {
 	rgb_col_index = col;
 
@@ -524,19 +570,20 @@ void rgb_set_index_colour(char col)
 	if (rgb_state == RS_STOP)
 		rgb_state = RS_SOLID;
 	rgb_running = 1;
+
+	//rgb_send_target();
 }
 
-void rgb_set_absolute_colour(byte r, byte g, byte b)
+void rgb_set_target_by_rgb(byte r, byte g, byte b)
 {
-	rgb_state = RS_STOP;
-	rgb_running = 0;
-	rgb_mpc[0] = 0;
-	rgb_mpc[1] = 0;
-	rgb_mpc[2] = 0;
-	rgb_output.r = r;
-	rgb_output.g = g;
-	rgb_output.b = b;
-	rgb_send_set();
+	rgb_target.r = r;
+	rgb_target.g = g;
+	rgb_target.b = b;
+
+	rgb_state = RS_SOLID;
+	rgb_running = 1;
+
+	//rgb_send_target();
 }
 
 void rgb_set_intensity(int i)
@@ -546,7 +593,106 @@ void rgb_set_intensity(int i)
 	else if (i > RGB_MAX_INTENSITY)
 		i = RGB_MAX_INTENSITY;
 	rgb_intensity = (byte) i;
+
 	rgb_send_intensity();
+}
+
+void rgb_set_delay(int delay)
+{
+	rgb_delay = delay;
+	rgb_send_delay();
+}
+
+void rgb_set_mode(char mode, char col_mode)
+{
+	rgb_mode = mode;
+	rgb_col_mode = col_mode;
+
+	switch (rgb_mode) {
+	    case RM_SWITCH:
+		rgb_state = RS_SOLID;
+		rgb_send_mode(RM_SWITCH, rgb_col_mode);
+		break;
+	    case RM_SWIRL:
+		rgb_state = RS_SWIRL_HOLD;
+		rgb_send_mode(RM_FADE_FOLLOW, rgb_col_mode);
+		break;
+	    case RM_STROBE:
+		rgb_state = RS_STROBE_OFF;
+		rgb_send_mode(RM_SWITCH, RCM_ONE);
+		break;
+	    case RM_FADE_FOLLOW:
+		rgb_state = RS_SWIRL_HOLD;
+		rgb_send_mode(rgb_mode, rgb_col_mode);
+		break;
+	    case RM_BROWNIAN:
+		rgb_state = RS_BROWNIAN;
+		rgb_brownian = random(0, RGB_BROWNIAN_MAX);
+		rgb_send_mode(RM_SWITCH, RCM_ONE);
+		break;
+	    default:
+		break;
+	}
+	//rgb_running = 1;
+	rgb_running = 0;
+
+}
+
+/******************************
+ * DaisyWire Control Messages *
+ ******************************/
+
+void rgb_send_on()
+{
+	char mode;
+
+	mode = (rgb_on & 0x02) >> 1;
+
+	daisy_write_byte(DAISY_ON);
+	daisy_write_byte(mode);
+	daisy_send_msg();
+}
+
+void rgb_send_mode(char mode, char col_mode)
+{
+	daisy_write_byte(DAISY_SET_MODE);
+	daisy_write_byte((mode & 0x0F) | ((col_mode & 0x0F) << 4));
+	daisy_send_msg();
+}
+
+void rgb_send_target()
+{
+	daisy_write_byte(DAISY_SET_TARGET);
+	daisy_write_byte(rgb_output.c[0]);
+	daisy_write_byte(rgb_output.c[1]);
+	daisy_write_byte(rgb_output.c[2]);
+	daisy_send_msg();
+}
+
+void rgb_send_delay()
+{
+	daisy_write_byte(DAISY_SET_DELAY);
+	daisy_write_byte((byte) (rgb_delay & 0x00FF));
+	daisy_write_byte((byte) ((rgb_delay & 0xFF00) >> 8));
+	daisy_send_msg();
+}
+
+void rgb_send_intensity()
+{
+	daisy_write_byte(DAISY_SET_INTENSITY);
+	daisy_write_byte(rgb_intensity);
+	daisy_send_msg();
+}
+
+void rgb_send_fade()
+{
+	daisy_write_byte(DAISY_FADE);
+	daisy_write_byte((byte) (rgb_delay & 0x00FF));
+	daisy_write_byte((byte) ((rgb_delay & 0xFF00) >> 8));
+	daisy_write_byte(rgb_output.c[0]);
+	daisy_write_byte(rgb_output.c[1]);
+	daisy_write_byte(rgb_output.c[2]);
+	daisy_send_msg();
 }
 
 /**************************
@@ -555,7 +701,6 @@ void rgb_set_intensity(int i)
 
 #define MAX_CHANNEL	10
 int channel = 3;
-int relay_on = 0;
 
 void set_channel(char ch)
 {
@@ -570,67 +715,82 @@ void set_channel(char ch)
 
 	switch (channel) {
 	    case 1:
-		rgb_col_index = WHITE;
-		rgb_target = rgb_palette[rgb_col_index];
-		rgb_state = RS_SOLID;
+		//rgb_col_index = WHITE;
+		//rgb_target = rgb_palette[rgb_col_index];
+		rgb_set_mode(RM_SWITCH, RCM_ONE);
+		rgb_set_target_by_index(WHITE);
 		break;
 	    case 2:
-		rgb_col_index = MEDIUM;
-		rgb_target = rgb_palette[rgb_col_index];
-		rgb_state = RS_SOLID;
+		//rgb_col_index = MEDIUM;
+		//rgb_target = rgb_palette[rgb_col_index];
+		//rgb_state = RS_SOLID;
+		rgb_set_mode(RM_SWITCH, RCM_ONE);
+		rgb_set_target_by_index(MEDIUM);
 		break;
 	    case 3:
-		rgb_col_index = WARM;
-		rgb_target = rgb_palette[rgb_col_index];
-		rgb_state = RS_SOLID;
+		//rgb_col_index = WARM;
+		//rgb_target = rgb_palette[rgb_col_index];
+		//rgb_state = RS_SOLID;
+		rgb_set_mode(RM_SWITCH, RCM_ONE);
+		rgb_set_target_by_index(WARM);
 		break;
 	    case 4:
 		// TODO set the colour to the current(last) selected colour
 		//rgb_target = rgb_palette[rgb_cur_col];
-		rgb_col_index = GOLD;
-		rgb_target = rgb_palette[rgb_col_index];
-		rgb_state = RS_SOLID;
+		//rgb_col_index = GOLD;
+		//rgb_target = rgb_palette[rgb_col_index];
+		//rgb_state = RS_SOLID;
+		rgb_set_mode(RM_SWITCH, RCM_ONE);
+		rgb_set_target_by_index(GOLD);
 		break;
 	    case 5:
 		// TODO set the colour to the current hue??
-		rgb_state = RS_STROBE;
-		rgb_col_mode = RCM_ONE;
+		//rgb_state = RS_STROBE;
+		//rgb_col_mode = RCM_ONE;
+		rgb_set_mode(RM_STROBE, RCM_ONE);
 		break;
 	    case 6:
-		rgb_state = RS_STROBE;
-		rgb_col_mode = RCM_RANDOM;
+		//rgb_state = RS_STROBE;
+		//rgb_col_mode = RCM_RANDOM;
+		rgb_set_mode(RM_STROBE, RCM_RANDOM);
 		break;
 	    case 7:
-		rgb_state = RS_SWIRL;
-		rgb_col_mode = RCM_MULTI;
+		//rgb_state = RS_SWIRL;
+		//rgb_col_mode = RCM_MULTI;
+		rgb_set_mode(RM_SWIRL, RCM_MULTI);
 		break;
 	    case 8:
-		rgb_state = RS_SWIRL;
-		rgb_col_mode = RCM_RANDOM;
+		//rgb_state = RS_SWIRL;
+		//rgb_col_mode = RCM_RANDOM;
+		rgb_set_mode(RM_SWIRL, RCM_RANDOM);
 		break;
 	    case 9:
-		rgb_state = RS_BROWNIAN;
+		//rgb_state = RS_BROWNIAN;
 		//rgb_col_index = random(RGB_COL_START, RGB_COL_END);
 		//rgb_output = rgb_palette[rgb_col_index];
-		rgb_brownian = random(0, RGB_BROWNIAN_MAX);
+		//rgb_brownian = random(0, RGB_BROWNIAN_MAX);
+		rgb_set_mode(RM_BROWNIAN, RCM_ONE);
 		break;
 	    default:
 		break;
 	}
 }
 
-byte dev_on = 0;
+/********************
+ * Input Processing *
+ ********************/
+
+int relay_on = 0;
 
 void process_ir(int key)
 {
 	int prev_channel = channel;
 
 	if (!(rgb_on & 0x01) && key != 0x248) {
-		Daisy.write((byte) 0x04);
-		Daisy.write((byte) DAISY_KEY);
-		Daisy.write((byte) (key & 0xFF));
-		Daisy.write((byte) ((key >> 8) & 0xFF));
-		Daisy.write((byte) DAISY_KEY + (key & 0xFF) + ((key >> 8) & 0xFF));
+		daisy_write_byte(DAISY_KEY);
+		daisy_write_byte((key & 0xFF));
+		daisy_write_byte(((key >> 8) & 0xFF));
+		daisy_send_msg();
 	}
 
 	switch (key) {
@@ -647,12 +807,6 @@ void process_ir(int key)
 	    case 0x248:		// Power
 		if (ir_repeat)	// Don't allow repeat codes
 			break;
-		//if (++dev_on >= 4)
-		//	dev_on = 0;
-		//rgb_on = (dev_on & 0x01);
-		/// Send on/off command to slave devices
-		//Daisy.print((dev_on & 0x02) >> 1, DEC);
-		//Daisy.print('\n');
 		rgb_enable(-1);
 		break;
 	    case 0x280:		// One
@@ -708,16 +862,16 @@ void process_ir(int key)
 		rgb_set_intensity(rgb_intensity - (rgb_intensity >> 3) - 1);
 		break;
 	    case 0x241:		// Channel Set +
-		rgb_set_index_colour(rgb_col_index - 1);
+		rgb_set_target_by_index(rgb_col_index - 1);
 		break;
 	    case 0x291:		// Enter
-		rgb_set_index_colour(rgb_col_index + 1);
+		rgb_set_target_by_index(rgb_col_index + 1);
 		break;
 	    case 0x201:		// Menu
-		rgb_delay += rgb_delay / 50;
+		rgb_set_delay(rgb_delay / 50);
 		break;
 	    case 0x2C1:		// Channel Set -
-		rgb_delay -= rgb_delay / 50;
+		rgb_set_delay(rgb_delay / 50);
 		break;
 	    default:
 		//process_channel_key(key);
@@ -789,7 +943,7 @@ void process_serial()
 	else if (!strcmp(serial_rb, "color")) {		// Set RGB Colour
 		if (nargs) {
 			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_set_absolute_colour(temp.bytes[2], temp.bytes[1], temp.bytes[0]);
+			rgb_set_target_by_rgb(temp.bytes[2], temp.bytes[1], temp.bytes[0]);
 		}
 		else {
 			// TODO return colour
@@ -832,7 +986,8 @@ void process_serial()
 	else if (!strcmp(serial_rb, "delay")) {		// Set RGB Delay
 		if (nargs) {
 			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_delay = temp.value;
+			//rgb_delay = temp.value;
+			rgb_set_delay(temp.value);
 		}
 		else {
 			Serial.print("delay ");
@@ -850,7 +1005,7 @@ void process_serial()
 	else if (!strcmp(serial_rb, "index")) {		// Set RGB Palette Colour
 		if (nargs) {
 			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_set_index_colour(temp.value);
+			rgb_set_target_by_index(temp.value);
 		}
 	}
 	else if (!strcmp(serial_rb, "intensity")) {	// Set RGB Intensity
@@ -871,20 +1026,19 @@ void process_serial()
 		set_channel(channel - 1);
 	}
 	else if (!strcmp(serial_rb, "indexup")) {	// Increment RGB Index Colour
-		rgb_set_index_colour(rgb_col_index + 1);
+		rgb_set_target_by_index(rgb_col_index + 1);
 	}
 	else if (!strcmp(serial_rb, "indexdown")) {	// Decrement RGB Index Colour
-		rgb_set_index_colour(rgb_col_index - 1);
+		rgb_set_target_by_index(rgb_col_index - 1);
 	}
 	else if (!strcmp(serial_rb, "calibrate")) {	// Send calibration RGB values to slave
 		if (nargs) {
 			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			Daisy.write((byte) 0x05);
-			Daisy.write((byte) DAISY_CALIBRATE);
-			Daisy.write((byte) temp.bytes[2]);
-			Daisy.write((byte) temp.bytes[1]);
-			Daisy.write((byte) temp.bytes[0]);
-			Daisy.write((byte) DAISY_CALIBRATE + temp.bytes[2] + temp.bytes[1] + temp.bytes[0]);
+			daisy_write_byte(DAISY_CALIBRATE);
+			daisy_write_byte(temp.bytes[2]);
+			daisy_write_byte(temp.bytes[1]);
+			daisy_write_byte(temp.bytes[0]);
+			daisy_send_msg();
 		}
 	}
 	else if (!strcmp(serial_rb, "relay_toggle")) {		// Control wireless relay
@@ -907,11 +1061,6 @@ void process_serial()
 
 void process_daisy()
 {
-	int i;
-	char type, cmd;
-	byte addr, data;
-	int value;
-
 	if (!daisy_avail)
 		return;
 
@@ -919,23 +1068,47 @@ void process_daisy()
 	    case DAISY_ON:
 		rgb_enable(daisy_rb[1]);
 		break;
-	    case DAISY_SET:
-		rgb_state = RS_STOP;
-		rgb_running = 0;
-		rgb_output.c[0] = daisy_rb[1];
-		rgb_output.c[1] = daisy_rb[2];
-		rgb_output.c[2] = daisy_rb[3];
+	    case DAISY_SET_MODE:
+		rgb_set_mode((daisy_rb[1] & 0x0F), ((daisy_rb[1] & 0xF0) >> 4));
 		break;
+	    case DAISY_SET_TARGET:
+		//rgb_state = RS_STOP;
+		//rgb_running = 0;
+		if (rgb_mode == RM_FADE_FOLLOW) {
+			rgb_state = RS_SWIRL_HOLD;
+			rgb_running = 0;
+		}
+		else if (rgb_state == RS_STOP) {
+			rgb_state = RS_SOLID;
+			rgb_running = 1;
+		}
+
+		rgb_target.c[0] = daisy_rb[1];
+		rgb_target.c[1] = daisy_rb[2];
+		rgb_target.c[2] = daisy_rb[3];
+		break;
+	/*
 	    case DAISY_FADE:
+		rgb_clear_state();
+		//rgb_output.c[0] = rgb_target.c[0];
+		//rgb_output.c[1] = rgb_target.c[1];
+		//rgb_output.c[2] = rgb_target.c[2];
+
 		rgb_state = RS_SWIRL_FADE;
 		rgb_running = 1;
 		rgb_delay = daisy_rb[1];
-		rgb_target.c[0] = daisy_rb[2];
-		rgb_target.c[1] = daisy_rb[3];
-		rgb_target.c[2] = daisy_rb[4];
+		rgb_delay |= (daisy_rb[2] << 8);
+		rgb_target.c[0] = daisy_rb[3];
+		rgb_target.c[1] = daisy_rb[4];
+		rgb_target.c[2] = daisy_rb[5];
 		rgb_setup_fade(rgb_delay);
 		break;
-	    case DAISY_INTENSITY:
+	*/
+	    case DAISY_SET_DELAY:
+		rgb_delay = daisy_rb[1];
+		rgb_delay |= (daisy_rb[2] << 8);
+		break;
+	    case DAISY_SET_INTENSITY:
 		rgb_intensity = daisy_rb[1];
 		break;
 	    case DAISY_CALIBRATE:
