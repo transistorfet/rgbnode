@@ -2,8 +2,9 @@
 
 #include <SoftwareSerial.h>
 #include <IRremote.h>
-#include "colours.h"
 
+#include "colours.h"
+#include "NerveSerial.h"
 
 /*******************
  * Pin Assignments *
@@ -12,19 +13,13 @@
 #define PIN_IRTX	3
 #define PIN_IRRX	12
 
-#define PIN_RELAY	4
-
 #define PIN_RED		6
 #define PIN_GREEN	5
 #define PIN_BLUE	9
 
-#define PIN_LED		13
-
 #define PIN_DAISYRX	7
 #define PIN_DAISYTX	8
 
-#define PIN_WRELAY_ON	10
-#define PIN_WRELAY_OFF	11
 
 /************
  * IR Codes *
@@ -40,43 +35,13 @@ typedef union {
 	unsigned long value;
 } LongT;
 
-int wrelay = 0;
-
 /******************************
  * Serial Communications Code *
  ******************************/
 
-#define SERIAL_SIZE	32
 #define SERIAL_SPEED	19200
 
-char serial_r = 0;
-char serial_avail = 0;
-char serial_rb[SERIAL_SIZE];
-
-int read_serial()
-{
-	int b;
-
-	b = Serial.read();
-	if (b == -1)
-		return 0;
-
-	serial_rb[serial_r] = b;
-	if (b == '\n' || b == '\r') {
-		serial_rb[serial_r + 1] = '\0';
-		serial_avail = 1;
-	}
-	if (serial_r < SERIAL_SIZE)
-		serial_r++;
-
-	return serial_avail;
-}
-
-void clear_serial()
-{
-	serial_avail = 0;
-	serial_r = 0;
-}
+NerveSerial nSerial(&Serial);
 
 
 /*********************************
@@ -91,14 +56,13 @@ void clear_serial()
 #define DAISY_CALIBRATE		0xA5
 #define DAISY_KEY		0xA6
 
-#define DAISY_FADE		0xA9
-
 #define DAISY_SIZE	8
 #define DAISY_SPEED	19200
 
 char daisy_r = 0;
 char daisy_size = 0;
 char daisy_avail = 0;
+char daisy_ready = 0;
 byte daisy_rb[DAISY_SIZE];
 
 char daisy_w = 0;
@@ -115,12 +79,21 @@ int read_daisy()
 	if (b == -1)
 		return 0;
 
+	// TODO you could possibly combine the size and command into one byte (A3, B3, C4, D5, E3, F5, 94 <-- possible command/size bytes for all daisywire commands)
 	if (!daisy_size) {
-		daisy_size = b;
+		/// In order to start reading a new message, we must have first read a 0x00 char from the bus, followed by a
+		/// non-zero number less than DAISY_SIZE.  We will ignore data until these conditions are met.
+		if (b == 0)
+			daisy_ready = 1;
+		if (daisy_ready && b > 0 && b < DAISY_SIZE) {
+			daisy_size = b;
+			daisy_ready = 0;
+		}
 	}
 	else {
 		daisy_rb[daisy_r++] = b;
 		if (daisy_r == daisy_size) {
+			/*
 			Serial.print("debugread ");
 			Serial.print(daisy_r, DEC);
 			Serial.write(' ');
@@ -129,6 +102,7 @@ int read_daisy()
 				Serial.write(' ');
 			}
 			Serial.write('\n');
+			*/
 
 			checksum = daisy_checksum(daisy_rb, daisy_r - 1);
 			if (daisy_rb[daisy_r - 1] == checksum)
@@ -138,7 +112,7 @@ int read_daisy()
 				clear_daisy();
 			}
 		}
-		if (daisy_r == SERIAL_SIZE)
+		if (daisy_r == DAISY_SIZE)
 			clear_daisy();
 	}
 	return daisy_avail;
@@ -161,6 +135,7 @@ void daisy_send_msg()
 	daisy_wb[daisy_w] = daisy_checksum(daisy_wb, daisy_w);
 	daisy_w++;
 
+	/*
 	Serial.print("debugwrite ");
 	Serial.print(daisy_w, DEC);
 	Serial.write(' ');
@@ -169,6 +144,16 @@ void daisy_send_msg()
 		Serial.write(' ');
 	}
 	Serial.write('\n');
+	*/
+
+	// TODO This is a convenient hack, but is there a better solution?  Sometimes the slave freezes,
+	// and while I'm not completely sure, I think it's because it gets some garbled bytes while reading
+	// the previous message (checksum failed), and misinterprets the next message, never getting back
+	// in sync.
+
+	/// Before each message, send a couple "null messages" to flush the link of any failed messages
+	Daisy.write((byte) 0x00);
+	Daisy.write((byte) 0x00);
 
 	Daisy.write((byte) daisy_w);
 	for (char i = 0; i < daisy_w; i++)
@@ -194,9 +179,11 @@ byte daisy_checksum(byte *buffer, int len)
 
 IRrecv irrecv(PIN_IRRX);
 decode_results ir_data;
+int ir_type;
 int ir_code;
 int ir_repeat;
 int ir_repeat_count = 0;
+char *ir_types[] = { "x", "N", "S", "RC5", "RC6", "D", "SH", "P", "J", "SA", "M" };
 
 int read_ir(void)
 {
@@ -212,6 +199,7 @@ int read_ir(void)
 		ir_repeat_count = 0;
 	}
 	else {
+		ir_type = ir_data.decode_type;
 		ir_code = (int) ((ir_data.value & 0xFF000000) >> 16) | ((ir_data.value & 0x0000FF00) >> 8);
 		ir_repeat = 0;
 		ir_repeat_count = 0;
@@ -254,6 +242,7 @@ void ir_send_panasonic(unsigned int address, unsigned long data)
 
 #define RGB_MAX_INTENSITY	0xff
 #define RGB_DEFAULT_INTENSITY	0x80
+#define RGB_MAX_DELAY		0x7fff
 #define RGB_BROWNIAN_MAX	0x600
 
 /// RGB Modes
@@ -274,7 +263,7 @@ enum {
 
 char rgb_mode = RM_SWITCH;
 char rgb_col_mode = RCM_ONE;
-int rgb_delay = 2000;
+int rgb_delay = 16000;
 char rgb_col_index = 0;
 RGBcol rgb_colour = { 0xFF, 0xFF, 0xFF };
 
@@ -282,32 +271,23 @@ int rgb_on = 0;
 int rgb_intensity = RGB_DEFAULT_INTENSITY;
 int rgb_intensity_prev = -1;
 
-/// RGB State Machine
+/// RGB Frame and State Machines
 enum {
-	RS_STOP,
-	RS_SWIRL_FADE,
-	RS_SWIRL_HOLD,
-	RS_STROBE_ON,
-	RS_STROBE_OFF,
-	RS_BROWNIAN,
-	RS_SOLID
+	RF_SWIRL_HOLD,
+	RF_SWIRL_FADE,
+	RF_STROBE_ON,
+	RF_STROBE_OFF
 };
 
-/*
 enum {
-	RS_STOP,
-	RS_FADE_ANIMATE,
-	RS_HOLD,
-	RS_STROBE_ON,
-	RS_STROBE_OFF,
+	RS_STOPPED,
+	RS_FADING,
+	RS_HOLDING,
 };
-*/
 
-#define RS_SWIRL	RS_SWIRL_HOLD
-#define RS_STROBE	RS_STROBE_OFF
-
-char rgb_running = 0;
-byte rgb_state = RS_STOP;
+char rgb_frame = 0;
+char rgb_state = RS_STOPPED;
+char rgb_target_updated = 0;
 RGBcol rgb_target = { 0xFF, 0xC0, 0x20 };
 RGBcol rgb_output = { 0xFF, 0xC0, 0x20 };
 RGBcol rgb_calibrate = { 0xFF, 0xFF, 0xFF };
@@ -316,15 +296,16 @@ RGBcol rgb_calibrate = { 0xFF, 0xFF, 0xFF };
 /// If negative, channel is decremented every * milliseconds
 int rgb_mpc[3] = { 0, 0, 0 };		// Millisecond per Change
 int rgb_mpc_remain[3] = { 0, 0, 0 };	// Milliseconds Left Over
-unsigned long rgb_mpc_last = millis();
+unsigned long rgb_mpc_last;
 
 int rgb_hold = 0;
-unsigned long rgb_hold_last = millis();
+unsigned long rgb_hold_last;
 
 int rgb_brownian = 0;
 
-void update_rgb_state(void);
-void rgb_next_state(void);
+void rgb_do_fade(void);
+void rgb_do_hold(void);
+void rgb_next_frame(void);
 RGBcol rgb_next_colour(void);
 
 void rgb_send_on();
@@ -333,24 +314,17 @@ void rgb_send_target();
 void rgb_send_delay();
 void rgb_send_intensity();
 
-void rgb_clear_state()
-{
-	rgb_running = 0;
-	rgb_hold = 0;
-	rgb_mpc[0] = 0;
-	rgb_mpc[1] = 0;
-	rgb_mpc[2] = 0;
-}
-
 void update_rgb()
 {
 	unsigned int r, g, b;
 
 	if (rgb_on & 0x01) {
-		if (rgb_running)
-			update_rgb_state();
-		if (!rgb_running && rgb_state != RS_STOP)
-			rgb_next_state();
+		if (rgb_state == RS_STOPPED)
+			rgb_next_frame();
+		else if (rgb_state == RS_FADING)
+			rgb_do_fade();
+		else if (rgb_state == RS_HOLDING)
+			rgb_do_hold();
 
 		r = map(rgb_output.r, 0, 255, 0, map(rgb_intensity, 0, 255, 0, rgb_calibrate.r));
 		g = map(rgb_output.g, 0, 255, 0, map(rgb_intensity, 0, 255, 0, rgb_calibrate.g));
@@ -367,7 +341,34 @@ void update_rgb()
 	}
 }
 
-void update_rgb_state(void)
+void rgb_clear_state()
+{
+	rgb_state = RS_STOPPED;
+	rgb_hold = 0;
+
+	rgb_mpc_last = 0;
+	rgb_mpc[0] = 0;
+	rgb_mpc[1] = 0;
+	rgb_mpc[2] = 0;
+	rgb_mpc_remain[0] = 0;
+	rgb_mpc_remain[1] = 0;
+	rgb_mpc_remain[2] = 0;
+}
+
+void rgb_setup_fade(int delay)
+{
+	rgb_state = RS_FADING;
+	rgb_mpc_last = millis();
+
+	for (int i = 0; i < 3; i++) {
+		if (rgb_target.c[i] == rgb_output.c[i])
+			rgb_mpc[i] = 0;
+		else
+			rgb_mpc[i] = delay / (rgb_target.c[i] - rgb_output.c[i]);
+	}
+}
+
+void rgb_do_fade(void)
 {
 	char change;
 	int diff, last;
@@ -393,66 +394,83 @@ void update_rgb_state(void)
 		}
 	}
 
-	if (last == 0 && rgb_hold == 0)
-		rgb_running = 0;
-	else if ((rgb_hold && ((millis() - rgb_hold_last) > rgb_hold)))
+	if (last == 0)
 		rgb_clear_state();
 }
 
-void rgb_setup_fade(int delay)
+void rgb_setup_hold(int delay)
 {
-	for (int i = 0; i < 3; i++) {
-		if (rgb_target.c[i] == rgb_output.c[i])
-			rgb_mpc[i] = 0;
-		else
-			rgb_mpc[i] = delay / (rgb_target.c[i] - rgb_output.c[i]);
-	}
+	rgb_state = RS_HOLDING;
+	rgb_hold = delay;
+	rgb_hold_last = millis();
 }
 
-void rgb_next_state(void)
+void rgb_do_hold()
 {
-	switch (rgb_state) {
-	    case RS_SWIRL_HOLD:
-		rgb_state = RS_SWIRL_FADE;
-		if (rgb_mode != RM_FADE_FOLLOW)
-			rgb_target = rgb_next_colour();
-		rgb_setup_fade(rgb_delay);
-		//rgb_send_fade();
-		rgb_send_target();
+	if (rgb_hold == 0 || (millis() - rgb_hold_last) > rgb_hold)
+		rgb_clear_state();
+}
+
+void rgb_next_frame(void)
+{
+	switch (rgb_mode) {
+	    case RM_SWITCH: {
+		if (rgb_target_updated) {
+			rgb_target_updated = 0;
+			rgb_output = rgb_target;
+			rgb_send_target();
+		}
 		break;
-	    case RS_SWIRL_FADE:
-		if (rgb_mode == RM_FADE_FOLLOW) {
-			rgb_state = RS_STOP;
-			rgb_running = 0;
-			return;
+	    }
+	    case RM_SWIRL: {
+		if (rgb_frame == RF_SWIRL_FADE) {
+			rgb_frame = RF_SWIRL_HOLD;
+			rgb_setup_hold(rgb_delay);
 		}
 		else {
-			rgb_state = RS_SWIRL_HOLD;
-			rgb_hold = rgb_delay;
-			rgb_hold_last = millis();
+			rgb_frame = RF_SWIRL_FADE;
+			rgb_target = rgb_next_colour();
+			rgb_setup_fade(rgb_delay);
+			rgb_send_target();
 		}
 		break;
-	    case RS_STROBE_ON:
-		rgb_state = RS_STROBE_OFF;
-		rgb_output = rgb_palette[BLACK];
-		rgb_hold = rgb_delay;
-		rgb_hold_last = millis();
+	    }
+	    case RM_STROBE: {
+		int delay;
+
+		if (rgb_frame == RF_STROBE_ON) {
+			rgb_frame = RF_STROBE_OFF;
+			rgb_output = rgb_palette[BLACK];
+			delay = rgb_delay >> 4;
+			if (delay < 100)
+				delay = 100;
+			rgb_setup_hold(delay);
+		}
+		else {
+			rgb_frame = RF_STROBE_ON;
+			rgb_output = rgb_next_colour();
+			rgb_setup_hold(20);
+		}
+		rgb_target = rgb_output;
 		rgb_send_target();
 		break;
-	    case RS_STROBE_OFF:
-		rgb_state = RS_STROBE_ON;
-		rgb_output = rgb_next_colour();
-		rgb_hold = 20;
-		rgb_hold_last = millis();
-		rgb_send_target();
+	    }
+	    case RM_FADE_FOLLOW: {
+		if (rgb_target_updated) {
+			rgb_target_updated = 0;
+			rgb_setup_fade(rgb_delay);
+			rgb_send_target();
+		}
 		break;
-	    case RS_BROWNIAN:
+	    }
+	    case RM_BROWNIAN: {
 		//int r, v;
 		//r = random(0, 3);
 		//v = rgb_output.c[r] + random(-1, 2);
 		//if (v >= 0 && v <= 255)
 		//	rgb_output.c[r] = v;
 
+		// TODO this is just the old code
 		int r;
 		r = random(0, 1000);
 		if (r < 3000)
@@ -501,18 +519,14 @@ void rgb_next_state(void)
 
 		rgb_hold = rgb_delay / 20;
 		rgb_hold_last = millis();
+
+		rgb_target = rgb_output;
 		rgb_send_target();
 		break;
-	    case RS_SOLID:
-		rgb_state = RS_STOP;
-		rgb_output = rgb_target;
-		rgb_send_target();
-		rgb_running = 0;
-		return;
+	    }
 	    default:
 		break;
 	}
-	rgb_running = 1;
 }
 
 RGBcol rgb_next_colour()
@@ -530,14 +544,6 @@ RGBcol rgb_next_colour()
 	}
 }
 
-/*
-void rgb_animate()
-{
-	rgb_setup_fade();
-	rgb_running = 1;
-}
-*/
-
 /************************
  * RGB Public Functions *
  ************************/
@@ -552,9 +558,48 @@ void rgb_enable(char mode)
 	}
 
 	rgb_send_on();
-	//rgb_send_target();
 	//rgb_send_delay();
-	//rgb_send_mode();
+	rgb_send_mode(rgb_mode, rgb_col_mode);
+	rgb_send_target();
+}
+
+void rgb_set_mode(char mode, char col_mode)
+{
+	rgb_mode = mode;
+	rgb_col_mode = col_mode;
+
+	rgb_frame = 0;
+	rgb_clear_state();
+
+	if (rgb_on & 0x01) {
+		/// if this device is on, then treat the next device as a slave
+		switch (rgb_mode) {
+		    case RM_SWITCH:
+			rgb_send_mode(RM_SWITCH, rgb_col_mode);
+			break;
+		    case RM_SWIRL:
+			rgb_send_mode(RM_FADE_FOLLOW, rgb_col_mode);
+			break;
+		    case RM_STROBE:
+			rgb_send_mode(RM_SWITCH, RCM_ONE);
+			break;
+		    case RM_FADE_FOLLOW:
+			rgb_send_mode(rgb_mode, rgb_col_mode);
+			break;
+		    case RM_BROWNIAN:
+			rgb_brownian = random(0, RGB_BROWNIAN_MAX);
+			rgb_send_mode(RM_SWITCH, RCM_ONE);
+			break;
+		    default:
+			break;
+		}
+	}
+	else {
+		/// otherwise just forward it the new mode
+		rgb_send_mode(rgb_mode, rgb_col_mode);
+	}
+
+	rgb_next_frame();
 }
 
 void rgb_set_target_by_index(char col)
@@ -567,11 +612,9 @@ void rgb_set_target_by_index(char col)
 		rgb_col_index = NUM_PALETTE - 1;
 
 	rgb_target = rgb_palette[rgb_col_index];
-	if (rgb_state == RS_STOP)
-		rgb_state = RS_SOLID;
-	rgb_running = 1;
 
-	//rgb_send_target();
+	rgb_target_updated = 1;
+	rgb_next_frame();
 }
 
 void rgb_set_target_by_rgb(byte r, byte g, byte b)
@@ -580,10 +623,8 @@ void rgb_set_target_by_rgb(byte r, byte g, byte b)
 	rgb_target.g = g;
 	rgb_target.b = b;
 
-	rgb_state = RS_SOLID;
-	rgb_running = 1;
-
-	//rgb_send_target();
+	rgb_target_updated = 1;
+	rgb_next_frame();
 }
 
 void rgb_set_intensity(int i)
@@ -599,44 +640,15 @@ void rgb_set_intensity(int i)
 
 void rgb_set_delay(int delay)
 {
+	if (delay < 0)
+		delay = 0;
+	else if (delay > RGB_MAX_DELAY)
+		delay = RGB_MAX_DELAY;
 	rgb_delay = delay;
+
 	rgb_send_delay();
 }
 
-void rgb_set_mode(char mode, char col_mode)
-{
-	rgb_mode = mode;
-	rgb_col_mode = col_mode;
-
-	switch (rgb_mode) {
-	    case RM_SWITCH:
-		rgb_state = RS_SOLID;
-		rgb_send_mode(RM_SWITCH, rgb_col_mode);
-		break;
-	    case RM_SWIRL:
-		rgb_state = RS_SWIRL_HOLD;
-		rgb_send_mode(RM_FADE_FOLLOW, rgb_col_mode);
-		break;
-	    case RM_STROBE:
-		rgb_state = RS_STROBE_OFF;
-		rgb_send_mode(RM_SWITCH, RCM_ONE);
-		break;
-	    case RM_FADE_FOLLOW:
-		rgb_state = RS_SWIRL_HOLD;
-		rgb_send_mode(rgb_mode, rgb_col_mode);
-		break;
-	    case RM_BROWNIAN:
-		rgb_state = RS_BROWNIAN;
-		rgb_brownian = random(0, RGB_BROWNIAN_MAX);
-		rgb_send_mode(RM_SWITCH, RCM_ONE);
-		break;
-	    default:
-		break;
-	}
-	//rgb_running = 1;
-	rgb_running = 0;
-
-}
 
 /******************************
  * DaisyWire Control Messages *
@@ -663,9 +675,9 @@ void rgb_send_mode(char mode, char col_mode)
 void rgb_send_target()
 {
 	daisy_write_byte(DAISY_SET_TARGET);
-	daisy_write_byte(rgb_output.c[0]);
-	daisy_write_byte(rgb_output.c[1]);
-	daisy_write_byte(rgb_output.c[2]);
+	daisy_write_byte(rgb_target.c[0]);
+	daisy_write_byte(rgb_target.c[1]);
+	daisy_write_byte(rgb_target.c[2]);
 	daisy_send_msg();
 }
 
@@ -684,17 +696,6 @@ void rgb_send_intensity()
 	daisy_send_msg();
 }
 
-void rgb_send_fade()
-{
-	daisy_write_byte(DAISY_FADE);
-	daisy_write_byte((byte) (rgb_delay & 0x00FF));
-	daisy_write_byte((byte) ((rgb_delay & 0xFF00) >> 8));
-	daisy_write_byte(rgb_output.c[0]);
-	daisy_write_byte(rgb_output.c[1]);
-	daisy_write_byte(rgb_output.c[2]);
-	daisy_send_msg();
-}
-
 /**************************
  * Channel Behaviour Code *
  **************************/
@@ -710,65 +711,38 @@ void set_channel(char ch)
 	else if (channel < 1)
 		channel = 1;
 
-	if (rgb_running)
-		rgb_clear_state();
-
 	switch (channel) {
 	    case 1:
-		//rgb_col_index = WHITE;
-		//rgb_target = rgb_palette[rgb_col_index];
 		rgb_set_mode(RM_SWITCH, RCM_ONE);
 		rgb_set_target_by_index(WHITE);
 		break;
 	    case 2:
-		//rgb_col_index = MEDIUM;
-		//rgb_target = rgb_palette[rgb_col_index];
-		//rgb_state = RS_SOLID;
 		rgb_set_mode(RM_SWITCH, RCM_ONE);
 		rgb_set_target_by_index(MEDIUM);
 		break;
 	    case 3:
-		//rgb_col_index = WARM;
-		//rgb_target = rgb_palette[rgb_col_index];
-		//rgb_state = RS_SOLID;
 		rgb_set_mode(RM_SWITCH, RCM_ONE);
 		rgb_set_target_by_index(WARM);
 		break;
 	    case 4:
 		// TODO set the colour to the current(last) selected colour
-		//rgb_target = rgb_palette[rgb_cur_col];
-		//rgb_col_index = GOLD;
-		//rgb_target = rgb_palette[rgb_col_index];
-		//rgb_state = RS_SOLID;
 		rgb_set_mode(RM_SWITCH, RCM_ONE);
 		rgb_set_target_by_index(GOLD);
 		break;
 	    case 5:
 		// TODO set the colour to the current hue??
-		//rgb_state = RS_STROBE;
-		//rgb_col_mode = RCM_ONE;
 		rgb_set_mode(RM_STROBE, RCM_ONE);
 		break;
 	    case 6:
-		//rgb_state = RS_STROBE;
-		//rgb_col_mode = RCM_RANDOM;
 		rgb_set_mode(RM_STROBE, RCM_RANDOM);
 		break;
 	    case 7:
-		//rgb_state = RS_SWIRL;
-		//rgb_col_mode = RCM_MULTI;
 		rgb_set_mode(RM_SWIRL, RCM_MULTI);
 		break;
 	    case 8:
-		//rgb_state = RS_SWIRL;
-		//rgb_col_mode = RCM_RANDOM;
 		rgb_set_mode(RM_SWIRL, RCM_RANDOM);
 		break;
 	    case 9:
-		//rgb_state = RS_BROWNIAN;
-		//rgb_col_index = random(RGB_COL_START, RGB_COL_END);
-		//rgb_output = rgb_palette[rgb_col_index];
-		//rgb_brownian = random(0, RGB_BROWNIAN_MAX);
 		rgb_set_mode(RM_BROWNIAN, RCM_ONE);
 		break;
 	    default:
@@ -782,7 +756,7 @@ void set_channel(char ch)
 
 int relay_on = 0;
 
-void process_ir(int key)
+char process_ir(int key)
 {
 	int prev_channel = channel;
 
@@ -795,8 +769,8 @@ void process_ir(int key)
 
 	switch (key) {
 	    case 0x2f0:		// TV/Video
-		relay_on = relay_on ? 0 : 1;
-		digitalWrite(PIN_RELAY, relay_on);
+		//relay_on = relay_on ? 0 : 1;
+		//digitalWrite(PIN_RELAY, relay_on);
 		break;
 	    case 0x2EA:		// Cap/Text
 		ir_send_panasonic(TV_ADDR, TV_POWER);
@@ -868,196 +842,17 @@ void process_ir(int key)
 		rgb_set_target_by_index(rgb_col_index + 1);
 		break;
 	    case 0x201:		// Menu
-		rgb_set_delay(rgb_delay / 50);
+		rgb_set_delay(rgb_delay + 50);
 		break;
 	    case 0x2C1:		// Channel Set -
-		rgb_set_delay(rgb_delay / 50);
+		rgb_set_delay(rgb_delay - 50);
 		break;
 	    default:
-		//process_channel_key(key);
-		break;
+		return(-1);
 	}
+	return(0);
 }
 
-#define SERIAL_MAX_ARGS		5
-
-void process_serial()
-{
-	char i;
-	char nargs = 0;
-	char argi[SERIAL_MAX_ARGS];
-
-	LongT temp;
-
-	if (!serial_avail)
-		return;
-
-	// Locate the indexes to each word and change spaces and newline to null terminations
-	for (i = 0; i < serial_r && serial_rb[i] != '\0'; i++) {
-		if (serial_rb[i] == ' ') {
-			serial_rb[i] = '\0';
-			argi[nargs] = i + 1;
-			if (++nargs >= SERIAL_MAX_ARGS)
-				break;
-		}
-		else if (serial_rb[i] == '\n') {
-			serial_rb[i] = '\0';
-			break;
-		}
-	}
-
-	// Determine and execute command
-	if (!strcmp(serial_rb, "ir")) {			// Transmit IR Code
-		if (nargs < 2)
-			return;
-		if (serial_rb[argi[0]] == 'S') {
-			temp.value = strtol(&serial_rb[argi[1]], NULL, 16);
-			ir_send_sony(temp.value);
-		}
-		else if (serial_rb[argi[0]] == 'P') {
-			int addr;
-
-			if (nargs < 3)
-				return;
-			addr = strtol(&serial_rb[argi[1]], NULL, 16);
-			temp.value = strtol(&serial_rb[argi[2]], NULL, 16);
-			ir_send_panasonic(addr, temp.value);
-		}	
-	}
-	else if (!strcmp(serial_rb, "key")) {		// Receive Key (IR Input for RGBNode, not for transmission)
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			process_ir((int) temp.value);
-		}
-	}
-	else if (!strcmp(serial_rb, "power")) {		// RGB Power On/Off
-		if (nargs) {
-			char mode = strtol(&serial_rb[argi[0]], NULL, 16);
-			if (mode >= 0 && mode <= 3)
-				rgb_enable(mode);
-		}
-		else {
-			rgb_enable(-1);
-		}
-	}
-	else if (!strcmp(serial_rb, "color")) {		// Set RGB Colour
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_set_target_by_rgb(temp.bytes[2], temp.bytes[1], temp.bytes[0]);
-		}
-		else {
-			// TODO return colour
-			//Serial.print("color", ...);
-		}
-	}
-	else if (!strcmp(serial_rb, "red")) {		// Set Red Value
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_output.r = temp.value;
-		}
-		else {
-			Serial.print("red ");
-			Serial.print(rgb_output.r, HEX);
-			Serial.write('\n');
-		}
-	}
-	else if (!strcmp(serial_rb, "green")) {		// Set Green Value
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_output.g = temp.value;
-		}
-		else {
-			Serial.print("green ");
-			Serial.print(rgb_output.g, HEX);
-			Serial.write('\n');
-		}
-	}
-	else if (!strcmp(serial_rb, "blue")) {		// Set Blue Value
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_output.b = temp.value;
-		}
-		else {
-			Serial.print("blue ");
-			Serial.print(rgb_output.b, HEX);
-			Serial.write('\n');
-		}
-	}
-	else if (!strcmp(serial_rb, "delay")) {		// Set RGB Delay
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			//rgb_delay = temp.value;
-			rgb_set_delay(temp.value);
-		}
-		else {
-			Serial.print("delay ");
-			Serial.print(rgb_delay, HEX);
-			Serial.write('\n');
-		}
-	}
-	else if (!strcmp(serial_rb, "channel")) {	// Set RGB Channel/Mode
-		if (nargs) {
-			char *arg = &serial_rb[argi[0]];
-			if (arg[1] == '\0' && arg[0] >= '0' && arg[0] <= '9')
-				set_channel(arg[0] - '0');
-		}
-	}
-	else if (!strcmp(serial_rb, "index")) {		// Set RGB Palette Colour
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_set_target_by_index(temp.value);
-		}
-	}
-	else if (!strcmp(serial_rb, "intensity")) {	// Set RGB Intensity
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			rgb_set_intensity(temp.value);
-		}
-		else {
-			Serial.print("intensity ");
-			Serial.print(rgb_intensity, HEX);
-			Serial.write('\n');
-		}
-	}
-	else if (!strcmp(serial_rb, "chanup")) {	// Increment RGB Channel
-		set_channel(channel + 1);
-	}
-	else if (!strcmp(serial_rb, "chandown")) {	// Decrement RGB Channel
-		set_channel(channel - 1);
-	}
-	else if (!strcmp(serial_rb, "indexup")) {	// Increment RGB Index Colour
-		rgb_set_target_by_index(rgb_col_index + 1);
-	}
-	else if (!strcmp(serial_rb, "indexdown")) {	// Decrement RGB Index Colour
-		rgb_set_target_by_index(rgb_col_index - 1);
-	}
-	else if (!strcmp(serial_rb, "calibrate")) {	// Send calibration RGB values to slave
-		if (nargs) {
-			temp.value = strtol(&serial_rb[argi[0]], NULL, 16);
-			daisy_write_byte(DAISY_CALIBRATE);
-			daisy_write_byte(temp.bytes[2]);
-			daisy_write_byte(temp.bytes[1]);
-			daisy_write_byte(temp.bytes[0]);
-			daisy_send_msg();
-		}
-	}
-	else if (!strcmp(serial_rb, "relay_toggle")) {		// Control wireless relay
-		if (nargs) {
-			if (wrelay) {
-				wrelay = 0;
-				digitalWrite(PIN_WRELAY_OFF, 1);
-				delay(1000);
-				digitalWrite(PIN_WRELAY_OFF, 0);
-			}
-			else {
-				wrelay = 1;
-				digitalWrite(PIN_WRELAY_ON, 1);
-				delay(1000);
-				digitalWrite(PIN_WRELAY_ON, 0);
-			}
-		}
-	}
-}
 
 void process_daisy()
 {
@@ -1072,44 +867,17 @@ void process_daisy()
 		rgb_set_mode((daisy_rb[1] & 0x0F), ((daisy_rb[1] & 0xF0) >> 4));
 		break;
 	    case DAISY_SET_TARGET:
-		//rgb_state = RS_STOP;
-		//rgb_running = 0;
-		if (rgb_mode == RM_FADE_FOLLOW) {
-			rgb_state = RS_SWIRL_HOLD;
-			rgb_running = 0;
-		}
-		else if (rgb_state == RS_STOP) {
-			rgb_state = RS_SOLID;
-			rgb_running = 1;
-		}
-
-		rgb_target.c[0] = daisy_rb[1];
-		rgb_target.c[1] = daisy_rb[2];
-		rgb_target.c[2] = daisy_rb[3];
+		rgb_set_target_by_rgb(daisy_rb[1], daisy_rb[2], daisy_rb[3]);
 		break;
-	/*
-	    case DAISY_FADE:
-		rgb_clear_state();
-		//rgb_output.c[0] = rgb_target.c[0];
-		//rgb_output.c[1] = rgb_target.c[1];
-		//rgb_output.c[2] = rgb_target.c[2];
-
-		rgb_state = RS_SWIRL_FADE;
-		rgb_running = 1;
-		rgb_delay = daisy_rb[1];
-		rgb_delay |= (daisy_rb[2] << 8);
-		rgb_target.c[0] = daisy_rb[3];
-		rgb_target.c[1] = daisy_rb[4];
-		rgb_target.c[2] = daisy_rb[5];
-		rgb_setup_fade(rgb_delay);
-		break;
-	*/
 	    case DAISY_SET_DELAY:
-		rgb_delay = daisy_rb[1];
-		rgb_delay |= (daisy_rb[2] << 8);
+		int delay;
+
+		delay = daisy_rb[1];
+		delay |= (daisy_rb[2] << 8);
+		rgb_set_delay(delay);
 		break;
 	    case DAISY_SET_INTENSITY:
-		rgb_intensity = daisy_rb[1];
+		rgb_set_intensity(daisy_rb[1]);
 		break;
 	    case DAISY_CALIBRATE:
 		rgb_calibrate.c[0] = daisy_rb[1];
@@ -1130,6 +898,192 @@ void process_daisy()
 }
 
 
+void command_ir()
+{
+	long code, addr;
+
+	if (nSerial.get_arg(0)[0] == 'S') {
+		code = strtol(nSerial.get_arg(1), NULL, 0);
+		ir_send_sony(code);
+	}
+	else if (nSerial.get_arg(0)[0] == 'P') {
+		if (nSerial.num_args() < 3)
+			return;
+		addr = strtol(nSerial.get_arg(1), NULL, 0);
+		code = strtol(nSerial.get_arg(2), NULL, 0);
+		ir_send_panasonic(addr, code);
+	}
+}
+
+void command_key()
+{
+	int key;
+
+	key = strtol(nSerial.get_arg(0), NULL, 0);
+	process_ir(key);
+}
+
+void command_power()
+{
+	char arg;
+
+	if (nSerial.num_args() > 0) {
+		arg = strtol(nSerial.get_arg(0), NULL, 10);
+		if (arg >= 0 && arg <= 3)
+			rgb_enable(arg);
+	}
+	else
+		rgb_enable(-1);
+}
+
+void command_color()
+{
+	LongT arg;
+
+	if (nSerial.num_args() > 0) {
+		arg.value = strtol(nSerial.get_arg(0), NULL, 0);
+		rgb_set_target_by_rgb(arg.bytes[2], arg.bytes[1], arg.bytes[0]);
+	}
+	Serial.write(' ');
+	Serial.print((rgb_target.r & 0xf0) >> 4, HEX);
+	Serial.print(rgb_target.r & 0x0f, HEX);
+	Serial.print((rgb_target.g & 0xf0) >> 4, HEX);
+	Serial.print(rgb_target.g & 0x0f, HEX);
+	Serial.print((rgb_target.b & 0xf0) >> 4, HEX);
+	Serial.print(rgb_target.b & 0x0f, HEX);
+}
+
+void command_red()
+{
+	int arg;
+
+	if (nSerial.num_args() > 0) {
+		arg = strtol(nSerial.get_arg(0), NULL, 0);
+		rgb_set_target_by_rgb(arg, rgb_target.g, rgb_target.b);
+	}
+	nSerial.print_arg(rgb_output.r, HEX);
+}
+
+void command_green()
+{
+	int arg;
+
+	if (nSerial.num_args() > 0) {
+		arg = strtol(nSerial.get_arg(0), NULL, 0);
+		rgb_set_target_by_rgb(rgb_target.r, arg, rgb_target.b);
+	}
+	nSerial.print_arg(rgb_output.g, HEX);
+}
+
+void command_blue()
+{
+	int arg;
+
+	if (nSerial.num_args() > 0) {
+		arg = strtol(nSerial.get_arg(0), NULL, 0);
+		rgb_set_target_by_rgb(rgb_target.r, rgb_target.g, arg);
+	}
+	nSerial.print_arg(rgb_output.b, HEX);
+}
+
+void command_delay()
+{
+	int arg;
+
+	if (nSerial.num_args() > 0) {
+		arg = strtol(nSerial.get_arg(0), NULL, 0);
+		rgb_set_delay(arg);
+	}
+	nSerial.print_arg(rgb_delay, HEX);
+}
+
+void command_channel()
+{
+	int arg;
+
+	arg = strtol(nSerial.get_arg(0), NULL, 0);
+	set_channel(arg);
+	nSerial.print_arg(channel, DEC);
+}
+
+void command_index()
+{
+	int arg;
+
+	arg = strtol(nSerial.get_arg(0), NULL, 0);
+	rgb_set_target_by_index(arg);
+	nSerial.print_arg(rgb_col_index, HEX);
+}
+
+void command_intensity()
+{
+	int arg;
+
+	if (nSerial.num_args() > 0) {
+		arg = strtol(nSerial.get_arg(0), NULL, 0);
+		rgb_set_intensity(arg);
+	}
+	nSerial.print_arg(rgb_intensity, HEX);
+}
+
+void command_chanup()
+{
+	set_channel(channel + 1);
+}
+
+void command_chandown()
+{
+	set_channel(channel - 1);
+}
+
+void command_indexup()
+{
+	rgb_set_target_by_index(rgb_col_index + 1);
+}
+
+void command_indexdown()
+{
+	rgb_set_target_by_index(rgb_col_index - 1);
+}
+
+void command_calibrate()
+{
+	LongT arg;
+
+	arg.value = strtol(nSerial.get_arg(0), NULL, 0);
+	daisy_write_byte(DAISY_CALIBRATE);
+	daisy_write_byte(arg.bytes[2]);
+	daisy_write_byte(arg.bytes[1]);
+	daisy_write_byte(arg.bytes[0]);
+	daisy_send_msg();
+	nSerial.print_arg(arg.value, HEX);
+}
+
+void command_default()
+{
+	Serial.print("error\n");
+}
+
+NerveCommand_t command_list[] = {
+	{ "ir", 2, command_ir },
+	{ "key", 1, command_key },
+	{ "power", 0, command_power },
+	{ "color", 1, command_color },
+	{ "red", 1, command_red },
+	{ "green", 1, command_green },
+	{ "blue", 1, command_blue },
+	{ "delay", 1, command_delay },
+	{ "channel", 1, command_channel },
+	{ "index", 1, command_index },
+	{ "intensity", 1, command_intensity },
+	{ "chanup", 0, command_chanup },
+	{ "chandown", 0, command_chandown },
+	{ "indexup", 0, command_indexup },
+	{ "indexdown", 0, command_indexdown },
+	{ "calibrate", 1, command_calibrate },
+	{ 0, 0, command_default }
+};
+
 /****************
  * Setup & Loop *
  ****************/
@@ -1137,11 +1091,6 @@ void process_daisy()
 void setup()
 {
 	randomSeed(analogRead(0));
-
-	pinMode(PIN_RELAY, OUTPUT);
-	pinMode(PIN_WRELAY_ON, OUTPUT);
-	pinMode(PIN_WRELAY_OFF, OUTPUT);
-	pinMode(PIN_LED, OUTPUT);
 
 	pinMode(PIN_RED, OUTPUT);
 	pinMode(PIN_GREEN, OUTPUT);
@@ -1154,28 +1103,39 @@ void setup()
 	bitSet(TCCR1B, WGM12);
 
 	Serial.begin(SERIAL_SPEED);
-	clear_serial();
+	nSerial.set_commands(command_list);
 	Daisy.begin(DAISY_SPEED);
 	clear_daisy();
 	irrecv.enableIRIn();
 
-	rgb_next_state();
+	Daisy.write((byte) 0x00);
+	Daisy.write((byte) 0x00);
+	Daisy.write((byte) 0x00);
+	Daisy.write((byte) 0x00);
 }
 
 void loop()
 {
-	if (read_serial()) {
-		process_serial();
-		clear_serial();
-	}
+	nSerial.check_read();
 
 	if (read_daisy()) {
 		process_daisy();
 		clear_daisy();
 	}
 
-	if (read_ir())
-		process_ir(ir_code);
+	if (read_ir()) {
+		if (process_ir(ir_code) == -1) {
+			nSerial.print("irrecv ");
+			nSerial.print(ir_types[(ir_data.decode_type < 0) ? 0 : ir_data.decode_type]);
+			nSerial.print(":");
+			if (ir_data.decode_type == PANASONIC) {
+				nSerial.print(ir_data.panasonicAddress, HEX);
+				nSerial.print(":");
+			}
+			nSerial.print(ir_data.value, HEX);
+			nSerial.print("\n");
+		}
+	}
 
 	update_rgb();
 }

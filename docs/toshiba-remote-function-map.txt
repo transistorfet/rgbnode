@@ -1,0 +1,28 @@
+0248	Power
+0280	One
+0240	Two
+02c0	Three
+0220	Four
+02a0	Five
+0260	Six
+02e0	Seven
+0210	Eight
+0290	Nine
+0200	Zero
+02e8	Channel Return
+0238	Recall
+02a8	Sleep
+0208	Mute
+02d8	Channel Up
+02f8	Channel Down
+0278	Volume Down
+0258	Volume Up
+0201	Menu
+02c1	Channel Set -
+0241	Channel Set +
+0291	Enter
+0230	Reset
+02f0	Tv/Video
+02ea	Cap/Text
+02c6	1/2
+ 
