@@ -105,6 +105,12 @@ void NerveSerial::print(char *str)
 	m_serial->print(str);
 }
 
+void NerveSerial::print_arg(char *str)
+{
+	m_serial->write(' ');
+	m_serial->print(str);
+}
+
 void NerveSerial::print(long num, char format)
 {
 	m_serial->print(num, format);

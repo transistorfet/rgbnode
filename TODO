@@ -1,5 +1,5 @@
 
-- limited palette for swirl
+- limited palette for swirl (like only swirl between 5 favorite colours)
 - add feedback such that every certain amount of change to delay will make it
   strobe the lights temporarily to signal the delay length
 - favorite delay buttons (recall, chn ret, sleep?)

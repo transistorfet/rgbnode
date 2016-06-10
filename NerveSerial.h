@@ -38,6 +38,7 @@ class NerveSerial {
 	inline char *get_command() { return m_read_buffer; }
 
 	void print(char *str);
+	void print_arg(char *str);
 	void print(long num, char format);
 	void print_arg(long num, char format);
 };

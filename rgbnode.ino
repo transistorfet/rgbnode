@@ -6,6 +6,8 @@
 #include "colours.h"
 #include "NerveSerial.h"
 
+#define VERSION		"0.9.5"
+
 /*******************
  * Pin Assignments *
  *******************/
@@ -1059,6 +1061,11 @@ void command_calibrate()
 	nSerial.print_arg(arg.value, HEX);
 }
 
+void command_version()
+{
+	nSerial.print_arg(VERSION);
+}
+
 void command_default()
 {
 	Serial.print("error\n");
@@ -1081,6 +1088,7 @@ NerveCommand_t command_list[] = {
 	{ "indexup", 0, command_indexup },
 	{ "indexdown", 0, command_indexdown },
 	{ "calibrate", 1, command_calibrate },
+	{ "version", 0, command_version },
 	{ 0, 0, command_default }
 };
 
