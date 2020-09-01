@@ -638,6 +638,7 @@ void rgb_set_intensity(int i)
 	rgb_intensity = (byte) i;
 
 	rgb_send_intensity();
+	nSerial.send("intensity %x\n", rgb_intensity);
 }
 
 void rgb_set_delay(int delay)
@@ -946,6 +947,7 @@ void command_color()
 		arg.value = strtol(nSerial.get_arg(0), NULL, 0);
 		rgb_set_target_by_rgb(arg.bytes[2], arg.bytes[1], arg.bytes[0]);
 	}
+	nSerial.start_reply();
 	Serial.write(' ');
 	Serial.print((rgb_target.r & 0xf0) >> 4, HEX);
 	Serial.print(rgb_target.r & 0x0f, HEX);
@@ -963,6 +965,7 @@ void command_red()
 		arg = strtol(nSerial.get_arg(0), NULL, 0);
 		rgb_set_target_by_rgb(arg, rgb_target.g, rgb_target.b);
 	}
+	nSerial.start_reply();
 	nSerial.print_arg(rgb_output.r, HEX);
 }
 
@@ -974,6 +977,7 @@ void command_green()
 		arg = strtol(nSerial.get_arg(0), NULL, 0);
 		rgb_set_target_by_rgb(rgb_target.r, arg, rgb_target.b);
 	}
+	nSerial.start_reply();
 	nSerial.print_arg(rgb_output.g, HEX);
 }
 
@@ -985,6 +989,7 @@ void command_blue()
 		arg = strtol(nSerial.get_arg(0), NULL, 0);
 		rgb_set_target_by_rgb(rgb_target.r, rgb_target.g, arg);
 	}
+	nSerial.start_reply();
 	nSerial.print_arg(rgb_output.b, HEX);
 }
 
@@ -996,6 +1001,7 @@ void command_delay()
 		arg = strtol(nSerial.get_arg(0), NULL, 0);
 		rgb_set_delay(arg);
 	}
+	nSerial.start_reply();
 	nSerial.print_arg(rgb_delay, HEX);
 }
 
@@ -1005,6 +1011,7 @@ void command_channel()
 
 	arg = strtol(nSerial.get_arg(0), NULL, 0);
 	set_channel(arg);
+	nSerial.start_reply();
 	nSerial.print_arg(channel, DEC);
 }
 
@@ -1014,6 +1021,7 @@ void command_index()
 
 	arg = strtol(nSerial.get_arg(0), NULL, 0);
 	rgb_set_target_by_index(arg);
+	nSerial.start_reply();
 	nSerial.print_arg(rgb_col_index, HEX);
 }
 
@@ -1025,6 +1033,7 @@ void command_intensity()
 		arg = strtol(nSerial.get_arg(0), NULL, 0);
 		rgb_set_intensity(arg);
 	}
+	nSerial.start_reply();
 	nSerial.print_arg(rgb_intensity, HEX);
 }
 
@@ -1058,11 +1067,14 @@ void command_calibrate()
 	daisy_write_byte(arg.bytes[1]);
 	daisy_write_byte(arg.bytes[0]);
 	daisy_send_msg();
+
+	nSerial.start_reply();
 	nSerial.print_arg(arg.value, HEX);
 }
 
 void command_version()
 {
+	nSerial.start_reply();
 	nSerial.print_arg(VERSION);
 }
 
@@ -1133,15 +1145,10 @@ void loop()
 
 	if (read_ir()) {
 		if (process_ir(ir_code) == -1) {
-			nSerial.print("irrecv ");
-			nSerial.print(ir_types[(ir_data.decode_type < 0) ? 0 : ir_data.decode_type]);
-			nSerial.print(":");
-			if (ir_data.decode_type == PANASONIC) {
-				nSerial.print(ir_data.panasonicAddress, HEX);
-				nSerial.print(":");
-			}
-			nSerial.print(ir_data.value, HEX);
-			nSerial.print("\n");
+			if (ir_data.decode_type == PANASONIC)
+				nSerial.send("irrecv %s:%x:%x\n", ir_types[(ir_data.decode_type < 0) ? 0 : ir_data.decode_type], ir_data.panasonicAddress, ir_data.value);
+			else
+				nSerial.send("irrecv %s:%x\n", ir_types[(ir_data.decode_type < 0) ? 0 : ir_data.decode_type], ir_data.value);
 		}
 	}
 

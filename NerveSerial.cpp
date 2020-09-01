@@ -43,6 +43,7 @@ void NerveSerial::clear()
 {
 	m_avail = 0;
 	m_rpos = 0;
+	m_replied = 0;
 }
 
 void NerveSerial::process()
@@ -86,9 +87,9 @@ void NerveSerial::process()
 	for (i = 0; m_commands[i].name != 0; i++) {
 		if (!strcmp(m_read_buffer, m_commands[i].name)) {
 			if (m_nargs >= m_commands[i].args_min) {
-				m_serial->print(m_read_buffer);
 				(*m_commands[i].func)();
 				// TODO reencode and send back
+				start_reply();
 				m_serial->write('\n');
 				return;
 			}
@@ -98,6 +99,14 @@ void NerveSerial::process()
 	if (m_commands[i].func) {
 		(*m_commands[i].func)();
 	}
+}
+
+void NerveSerial::start_reply()
+{
+	if (m_replied)
+		return;
+	m_replied = 1;
+	m_serial->print(m_read_buffer);
 }
 
 void NerveSerial::print(char *str)
@@ -122,4 +131,38 @@ void NerveSerial::print_arg(long num, char format)
 	m_serial->print(num, format);
 }
 
+
+void NerveSerial::send(char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+
+	for (int i = 0; fmt[i] != '\0'; i++) {
+		if (fmt[i] == '%') {
+			switch (fmt[i + 1]) {
+				case 's': {
+					char *str = va_arg(args, char *);
+					m_serial->print(str);
+					break;
+				}
+				case 'x': {
+					int num = va_arg(args, int);
+					m_serial->print(num, HEX);
+					break;
+				}
+				case '%': {
+					m_serial->write('%');
+					break;
+				}
+				default:
+					break;
+			}
+			i++;
+		}
+		else
+			m_serial->write(fmt[i]);
+	}
+
+	va_end(args);
+}
  

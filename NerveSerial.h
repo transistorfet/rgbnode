@@ -20,6 +20,7 @@ class NerveSerial {
 	NerveCommand_t *m_commands = NULL;
 	char m_rpos = 0;
 	char m_avail = 0;
+	char m_replied = 0;
 	char m_read_buffer[NS_BUFFER_SIZE];
 	char m_nargs = 0;
 	char m_args[NS_MAX_ARGS];
@@ -37,10 +38,13 @@ class NerveSerial {
 	inline char *get_arg(char num) { return &m_read_buffer[m_args[num]]; }
 	inline char *get_command() { return m_read_buffer; }
 
+	void start_reply();
 	void print(char *str);
 	void print_arg(char *str);
 	void print(long num, char format);
 	void print_arg(long num, char format);
+
+	void send(char *fmt, ...);
 };
 
 /*
