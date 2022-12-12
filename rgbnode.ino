@@ -6,7 +6,7 @@
 #include "colours.h"
 #include "NerveSerial.h"
 
-#define VERSION		"0.9.5"
+#define VERSION		"0.9.6"
 
 /*******************
  * Pin Assignments *
@@ -179,39 +179,70 @@ byte daisy_checksum(byte *buffer, int len)
  * IR Recevier Code *
  ********************/
 
-IRrecv irrecv(PIN_IRRX);
-decode_results ir_data;
-int ir_type;
-int ir_code;
-int ir_repeat;
-int ir_repeat_count = 0;
-char *ir_types[] = { "x", "N", "S", "RC5", "RC6", "D", "SH", "P", "J", "SA", "M" };
+IRData ir_last;
+
+void init_ir_receiver(void)
+{
+	IrReceiver.begin(PIN_IRRX, DISABLE_LED_FEEDBACK);
+}
 
 int read_ir(void)
 {
-	if (!irrecv.decode(&ir_data))
-		return(0);
+	if (!IrReceiver.decode())
+		return 0;
 
-	if (ir_data.value == 0xFFFFFFFF) {
-		if (++ir_repeat_count <= (ir_repeat ? 1 : 4)) {
-			irrecv.resume();
-			return(0);
+	ir_last = IrReceiver.decodedIRData;
+	IrReceiver.resume();
+
+	if (!(IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT))
+		return 1;
+	else
+		return 0;
+}
+
+void check_ir(void)
+{
+	if (read_ir()) {
+		if (ir_last.protocol == NEC && ir_last.address == 0x40 && process_ir(ir_last.command) != -1) {
+			// It was processed, so do nothing else
 		}
-		ir_repeat = 1;
-		ir_repeat_count = 0;
+		else {
+			nSerial.send("irrecv %s:%x:%x\n", get_protocol(ir_last.protocol), ir_last.address, ir_last.command);
+		}
 	}
-	else {
-		ir_type = ir_data.decode_type;
-		ir_code = (int) ((ir_data.value & 0xFF000000) >> 16) | ((ir_data.value & 0x0000FF00) >> 8);
-		ir_repeat = 0;
-		ir_repeat_count = 0;
-	}
+}
 
-	//Serial.print("I0=");
-	//Serial.print(ir_code, HEX);
-	//Serial.print('\n');
-	irrecv.resume();
-	return(1);
+char *get_protocol(decode_type_t protocol)
+{
+	switch (protocol) {
+		case NEC:
+			return "N";
+		case PANASONIC:
+			return "P";
+		case SONY:
+			return "S";
+		case ONKYO:
+			return "O";
+		case JVC:
+			return "J";
+		case SHARP:
+			return "SH";
+		case DENON:
+			return "D";
+		case LG:
+		case LG2:
+			return "L";
+		case RC5:
+			return "RC5";
+		case RC6:
+			return "RC6";
+		case SAMSUNG:
+			return "SA";
+		case APPLE:
+			return "A";
+		default:
+			return "x";
+	}
 }
 
 
@@ -221,20 +252,28 @@ int read_ir(void)
 
 IRsend irsend;
 
+void init_ir_sender(void)
+{
+	IrSender.begin(PIN_IRTX, DISABLE_LED_FEEDBACK);
+}
+
 void ir_send_sony(unsigned int data)
 {
-	irsend.sendSony(data, 12);
+	IrSender.sendSony(data, 12);
 	delay(50);
-	irsend.sendSony(data, 12);
+	IrSender.sendSony(data, 12);
 	delay(50);
-	irsend.sendSony(data, 12);
-	irrecv.enableIRIn();
+	IrSender.sendSony(data, 12);
 }
 
 void ir_send_panasonic(unsigned int address, unsigned long data)
 {
-	irsend.sendPanasonic(address, data);
-	irrecv.enableIRIn();
+	IrSender.sendPanasonic(address, data);
+}
+
+void ir_send_nec(unsigned long data)
+{
+	IrSender.sendNEC(data, 16);
 }
 
 
@@ -763,7 +802,7 @@ char process_ir(int key)
 {
 	int prev_channel = channel;
 
-	if (!(rgb_on & 0x01) && key != 0x248) {
+	if (!(rgb_on & 0x01) && key != 0x12) {
 		daisy_write_byte(DAISY_KEY);
 		daisy_write_byte((key & 0xFF));
 		daisy_write_byte(((key >> 8) & 0xFF));
@@ -771,58 +810,56 @@ char process_ir(int key)
 	}
 
 	switch (key) {
-	    case 0x2f0:		// TV/Video
+	    case 0x0f:		// TV/Video
 		//relay_on = relay_on ? 0 : 1;
 		//digitalWrite(PIN_RELAY, relay_on);
 		break;
-	    case 0x2EA:		// Cap/Text
+	    case 0x57:		// Cap/Text
 		ir_send_panasonic(TV_ADDR, TV_POWER);
 		break;
-	    case 0x2C6:		// 1/2
+	    case 0x63:		// 1/2
 		ir_send_sony(STEREO_POWER);
 		break;
-	    case 0x248:		// Power
-		if (ir_repeat)	// Don't allow repeat codes
-			break;
+	    case 0x12:		// Power
 		rgb_enable(-1);
 		break;
-	    case 0x280:		// One
+	    case 0x01:		// One
 		set_channel(1);
 		break;
-	    case 0x240:		// Two
+	    case 0x02:		// Two
 		set_channel(2);
 		break;
-	    case 0x2C0:		// Three
+	    case 0x03:		// Three
 		set_channel(3);
 		break;
-	    case 0x220:		// Four
+	    case 0x04:		// Four
 		set_channel(4);
 		break;
-	    case 0x2A0:		// Five
+	    case 0x05:		// Five
 		set_channel(5);
 		break;
-	    case 0x260:		// Six
+	    case 0x06:		// Six
 		set_channel(6);
 		break;
-	    case 0x2E0:		// Seven
+	    case 0x07:		// Seven
 		set_channel(7);
 		break;
-	    case 0x210:		// Eight
+	    case 0x08:		// Eight
 		set_channel(8);
 		break;
-	    case 0x290:		// Nine
+	    case 0x09:		// Nine
 		set_channel(9);
 		break;
-	    case 0x200:		// Zero
+	    case 0x00:		// Zero
 		set_channel(0);
 		break;
-	    case 0x2D8:		// Channel Up
+	    case 0x1b:		// Channel Up
 		set_channel(channel + 1);
 		break;
-	    case 0x2F8:		// Channel Down
+	    case 0x1f:		// Channel Down
 		set_channel(channel - 1);
 		break;
-	    case 0x208:		// Mute
+	    case 0x10:		// Mute
 		if (rgb_intensity_prev == -1) {
 			rgb_intensity_prev = rgb_intensity;
 			rgb_set_intensity(RGB_MAX_INTENSITY);
@@ -832,22 +869,22 @@ char process_ir(int key)
 			rgb_intensity_prev = -1;
 		}
 		break;
-	    case 0x258:		// Volume Up
+	    case 0x1a:		// Volume Up
 		rgb_set_intensity(rgb_intensity + (rgb_intensity >> 3) + 1);
 		break;
-	    case 0x278:		// Volume Down
+	    case 0x1e:		// Volume Down
 		rgb_set_intensity(rgb_intensity - (rgb_intensity >> 3) - 1);
 		break;
-	    case 0x241:		// Channel Set +
+	    case 0x82:		// Channel Set +
 		rgb_set_target_by_index(rgb_col_index - 1);
 		break;
-	    case 0x291:		// Enter
+	    case 0x89:		// Enter
 		rgb_set_target_by_index(rgb_col_index + 1);
 		break;
-	    case 0x201:		// Menu
+	    case 0x80:		// Menu
 		rgb_set_delay(rgb_delay + 50);
 		break;
-	    case 0x2C1:		// Channel Set -
+	    case 0x83:		// Channel Set -
 		rgb_set_delay(rgb_delay - 50);
 		break;
 	    default:
@@ -915,6 +952,10 @@ void command_ir()
 		addr = strtol(nSerial.get_arg(1), NULL, 0);
 		code = strtol(nSerial.get_arg(2), NULL, 0);
 		ir_send_panasonic(addr, code);
+	}
+	else if (nSerial.get_arg(0)[0] == 'N') {
+		code = strtol(nSerial.get_arg(1), NULL, 0);
+		ir_send_nec(code);
 	}
 }
 
@@ -1122,11 +1163,14 @@ void setup()
 	// Put Timer1 into FastPWM mode to match Timer0.  This should eliminate the flickering effect
 	bitSet(TCCR1B, WGM12);
 
+	// Initialize the IR receiver
+	init_ir_receiver();
+	init_ir_sender();
+
 	Serial.begin(SERIAL_SPEED);
 	nSerial.set_commands(command_list);
 	Daisy.begin(DAISY_SPEED);
 	clear_daisy();
-	irrecv.enableIRIn();
 
 	Daisy.write((byte) 0x00);
 	Daisy.write((byte) 0x00);
@@ -1143,14 +1187,7 @@ void loop()
 		clear_daisy();
 	}
 
-	if (read_ir()) {
-		if (process_ir(ir_code) == -1) {
-			if (ir_data.decode_type == PANASONIC)
-				nSerial.send("irrecv %s:%x:%x\n", ir_types[(ir_data.decode_type < 0) ? 0 : ir_data.decode_type], ir_data.panasonicAddress, ir_data.value);
-			else
-				nSerial.send("irrecv %s:%x\n", ir_types[(ir_data.decode_type < 0) ? 0 : ir_data.decode_type], ir_data.value);
-		}
-	}
+	check_ir();
 
 	update_rgb();
 }
